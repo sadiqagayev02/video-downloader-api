@@ -5,7 +5,7 @@ RUN pip3 install -U yt-dlp --break-system-packages
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --only=production
+RUN npm install --only=production   # <-- BU SATIR DƏYİŞDİ
 
 COPY . .
 RUN mkdir -p /app/tmp
