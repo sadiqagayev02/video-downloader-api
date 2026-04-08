@@ -20,7 +20,7 @@ async function ensureTmpDir() {
         await fs.mkdir(tmpDir, { recursive: true });
         console.log(`✅ TMP qovluğu: ${tmpDir}`);
     } catch (err) {
-        console.log(`⚠️ TMP qovluğu xətası: ${err.message}`);
+        console.log(`⚠️ TMP xətası: ${err.message}`);
     }
 }
 ensureTmpDir();
@@ -30,7 +30,7 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// INFO - REAL məlumat alma
+// INFO - BÜTÜN PLATFORMALAR
 app.post('/api/info', async (req, res) => {
     const { url } = req.body;
     
@@ -63,11 +63,17 @@ app.post('/api/info', async (req, res) => {
             const videos = data.formats.filter(f => f.vcodec !== 'none' && f.height);
             const uniqueHeights = [...new Set(videos.map(v => v.height).filter(h => h))].sort((a,b) => b - a);
             
-            for (const height of uniqueHeights.slice(0, 4)) {
+            for (const height of uniqueHeights.slice(0, 5)) {
                 const video = videos.find(v => v.height === height);
                 if (video) {
+                    let label = `${height}p`;
+                    if (height >= 2160) label = '4K Ultra HD';
+                    else if (height >= 1440) label = '2K Quad HD';
+                    else if (height >= 1080) label = '1080p Full HD';
+                    else if (height >= 720) label = '720p HD';
+                    
                     qualities.push({
-                        label: height >= 1080 ? '1080p HD' : `${height}p`,
+                        label: label,
                         value: `${height}p`,
                         formatId: video.format_id,
                         url: video.url,
@@ -93,31 +99,49 @@ app.post('/api/info', async (req, res) => {
             }
         }
 
+        // Platformanı təyin et
+        let platform = 'youtube';
+        if (url.includes('tiktok.com')) platform = 'tiktok';
+        else if (url.includes('instagram.com')) platform = 'instagram';
+        else if (url.includes('facebook.com')) platform = 'facebook';
+
         const result = {
             success: true,
             data: {
                 title: data.title,
                 thumbnail: data.thumbnail,
                 duration: data.duration ? `${Math.floor(data.duration / 60)}:${(data.duration % 60).toString().padStart(2, '0')}` : '00:00',
-                platform: url.includes('tiktok.com') ? 'tiktok' : (url.includes('instagram.com') ? 'instagram' : (url.includes('facebook.com') ? 'facebook' : 'youtube')),
+                platform: platform,
                 uploader: data.uploader || data.channel || 'Unknown',
                 qualities: qualities
             }
         };
         
-        console.log(`✅ Məlumat tapıldı: ${data.title}`);
+        console.log(`✅ Məlumat tapıldı: ${data.title} (${platform})`);
         res.json(result);
         
     } catch (err) {
         console.error(`❌ Info xətası: ${err.message}`);
+        
+        let errorMessage = err.message;
+        if (err.message.includes('Sign in') || err.message.includes('bot')) {
+            errorMessage = 'YouTube bu videonu blokladı';
+        } else if (err.message.includes('Private')) {
+            errorMessage = 'Bu video özəldir (login tələb olunur)';
+        } else if (err.message.includes('429')) {
+            errorMessage = 'Həddən çox sorğu';
+        } else if (err.message.includes('Video unavailable')) {
+            errorMessage = 'Video tapılmadı və ya silinib';
+        }
+        
         res.status(500).json({ 
             success: false, 
-            error: err.message.includes('Sign in') ? 'YouTube bu videonu blokladı' : err.message 
+            error: errorMessage 
         });
     }
 });
 
-// DOWNLOAD START - REAL yükləmə
+// DOWNLOAD START
 app.post('/api/download/start', async (req, res) => {
     const { url, quality } = req.body;
     
@@ -130,14 +154,20 @@ app.post('/api/download/start', async (req, res) => {
 
     try {
         // Əvvəl info al
-        const infoCmd = `yt-dlp --dump-json --no-playlist "${url}"`;
+        let infoCmd = `yt-dlp --dump-json --no-playlist "${url}"`;
+        
+        if (url.includes('tiktok.com')) {
+            infoCmd = `yt-dlp --dump-json --no-playlist --extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com" "${url}"`;
+        }
+        
         const { stdout } = await execPromise(infoCmd, { timeout: 30000 });
         const data = JSON.parse(stdout);
         
         // Format ID-ni tap
         let formatId = quality;
         if (quality !== 'audio') {
-            const video = data.formats.find(f => f.height === parseInt(quality) && f.vcodec !== 'none');
+            const height = parseInt(quality);
+            const video = data.formats.find(f => f.height === height && f.vcodec !== 'none');
             if (video) formatId = video.format_id;
         } else {
             const audio = data.formats.find(f => f.acodec !== 'none' && f.vcodec === 'none');
@@ -168,7 +198,7 @@ app.post('/api/download/start', async (req, res) => {
     }
 });
 
-// DOWNLOAD FILE - Faylı yüklə
+// DOWNLOAD FILE
 app.get('/api/download/file/:fileId', async (req, res) => {
     const { fileId } = req.params;
     const possibleExts = ['mp4', 'm4a'];
@@ -188,7 +218,7 @@ app.get('/api/download/file/:fileId', async (req, res) => {
     }
     
     res.download(filePath, async (err) => {
-        if (err) console.error('Fayl göndərilərkən xəta:', err);
+        if (err) console.error('Fayl xətası:', err);
         try {
             await fs.unlink(filePath);
             console.log(`🗑️ Fayl silindi: ${filePath}`);
@@ -200,6 +230,7 @@ app.get('/api/download/file/:fileId', async (req, res) => {
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Video Downloader API işləyir!',
+        platforms: ['YouTube', 'TikTok', 'Instagram', 'Facebook'],
         endpoints: {
             health: 'GET /api/health',
             info: 'POST /api/info',
