@@ -14,56 +14,39 @@ const tmpDir = '/tmp/video-downloader';
 app.use(cors());
 app.use(express.json());
 
-// TMP qovluğunu yarat
 async function ensureTmpDir() {
     try {
         await fs.mkdir(tmpDir, { recursive: true });
-        console.log(`✅ TMP qovluğu: ${tmpDir}`);
-    } catch (err) {
-        console.log(`⚠️ TMP xətası: ${err.message}`);
-    }
+        console.log(`✅ TMP: ${tmpDir}`);
+    } catch (err) {}
 }
 ensureTmpDir();
 
-// HEALTH CHECK
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// INFO - BÜTÜN PLATFORMALAR
 app.post('/api/info', async (req, res) => {
     const { url } = req.body;
-    
-    if (!url) {
-        return res.status(400).json({ error: 'URL tələb olunur' });
-    }
+    if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
-    console.log(`📡 Məlumat alınır: ${url}`);
+    console.log(`📡 Məlumat: ${url}`);
 
     try {
-        // Platformaya görə fərqli parametrlər
         let cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 30 "${url}"`;
-        
         if (url.includes('tiktok.com')) {
             cmd = `yt-dlp --dump-json --no-playlist --extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com" "${url}"`;
-        } else if (url.includes('instagram.com')) {
-            cmd = `yt-dlp --dump-json --no-playlist "${url}"`;
-        } else if (url.includes('facebook.com') || url.includes('fb.watch')) {
-            cmd = `yt-dlp --dump-json --no-playlist "${url}"`;
         }
 
         const { stdout } = await execPromise(cmd, { timeout: 60000 });
         const data = JSON.parse(stdout);
 
-        // Keyfiyyətləri çıxar
         const qualities = [];
-        
-        if (data.formats && data.formats.length > 0) {
-            // Video formatları
+        if (data.formats) {
             const videos = data.formats.filter(f => f.vcodec !== 'none' && f.height);
-            const uniqueHeights = [...new Set(videos.map(v => v.height).filter(h => h))].sort((a,b) => b - a);
+            const heights = [...new Set(videos.map(v => v.height).filter(h => h))].sort((a,b) => b - a);
             
-            for (const height of uniqueHeights.slice(0, 5)) {
+            for (const height of heights.slice(0, 5)) {
                 const video = videos.find(v => v.height === height);
                 if (video) {
                     let label = `${height}p`;
@@ -84,7 +67,6 @@ app.post('/api/info', async (req, res) => {
                 }
             }
             
-            // Audio
             const audio = data.formats.find(f => f.acodec !== 'none' && f.vcodec === 'none');
             if (audio) {
                 qualities.push({
@@ -99,13 +81,12 @@ app.post('/api/info', async (req, res) => {
             }
         }
 
-        // Platformanı təyin et
         let platform = 'youtube';
         if (url.includes('tiktok.com')) platform = 'tiktok';
         else if (url.includes('instagram.com')) platform = 'instagram';
         else if (url.includes('facebook.com')) platform = 'facebook';
 
-        const result = {
+        res.json({
             success: true,
             data: {
                 title: data.title,
@@ -115,47 +96,22 @@ app.post('/api/info', async (req, res) => {
                 uploader: data.uploader || data.channel || 'Unknown',
                 qualities: qualities
             }
-        };
-        
-        console.log(`✅ Məlumat tapıldı: ${data.title} (${platform})`);
-        res.json(result);
-        
-    } catch (err) {
-        console.error(`❌ Info xətası: ${err.message}`);
-        
-        let errorMessage = err.message;
-        if (err.message.includes('Sign in') || err.message.includes('bot')) {
-            errorMessage = 'YouTube bu videonu blokladı';
-        } else if (err.message.includes('Private')) {
-            errorMessage = 'Bu video özəldir (login tələb olunur)';
-        } else if (err.message.includes('429')) {
-            errorMessage = 'Həddən çox sorğu';
-        } else if (err.message.includes('Video unavailable')) {
-            errorMessage = 'Video tapılmadı və ya silinib';
-        }
-        
-        res.status(500).json({ 
-            success: false, 
-            error: errorMessage 
         });
+    } catch (err) {
+        console.error(`❌ Xəta: ${err.message}`);
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// DOWNLOAD START
 app.post('/api/download/start', async (req, res) => {
     const { url, quality } = req.body;
-    
-    if (!url || !quality) {
-        return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
-    }
+    if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
 
     const fileId = crypto.randomBytes(16).toString('hex');
-    console.log(`📥 Download: ${url}, keyfiyyət: ${quality}, ID: ${fileId}`);
+    console.log(`📥 Download: ${url}, ${quality}`);
 
     try {
-        // Əvvəl info al
         let infoCmd = `yt-dlp --dump-json --no-playlist "${url}"`;
-        
         if (url.includes('tiktok.com')) {
             infoCmd = `yt-dlp --dump-json --no-playlist --extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com" "${url}"`;
         }
@@ -163,7 +119,6 @@ app.post('/api/download/start', async (req, res) => {
         const { stdout } = await execPromise(infoCmd, { timeout: 30000 });
         const data = JSON.parse(stdout);
         
-        // Format ID-ni tap
         let formatId = quality;
         if (quality !== 'audio') {
             const height = parseInt(quality);
@@ -177,13 +132,8 @@ app.post('/api/download/start', async (req, res) => {
         const outputExt = quality === 'audio' ? 'm4a' : 'mp4';
         const outputPath = path.join(tmpDir, `out_${fileId}.${outputExt}`);
         
-        // Videonu yüklə
-        const downloadCmd = `yt-dlp -f ${formatId} -o "${outputPath}" "${url}"`;
-        await execPromise(downloadCmd, { timeout: 300000 });
-        
+        await execPromise(`yt-dlp -f ${formatId} -o "${outputPath}" "${url}"`, { timeout: 300000 });
         const stats = await fs.stat(outputPath);
-        
-        console.log(`✅ Download tamam: ${outputPath} (${stats.size} bytes)`);
         
         res.json({
             success: true,
@@ -191,14 +141,12 @@ app.post('/api/download/start', async (req, res) => {
             filename: `${data.title.replace(/[^a-zA-Z0-9]/g, '_')}.${outputExt}`,
             filesize: stats.size
         });
-        
     } catch (err) {
         console.error(`❌ Download xətası: ${err.message}`);
         res.status(500).json({ error: err.message });
     }
 });
 
-// DOWNLOAD FILE
 app.get('/api/download/file/:fileId', async (req, res) => {
     const { fileId } = req.params;
     const possibleExts = ['mp4', 'm4a'];
@@ -213,34 +161,17 @@ app.get('/api/download/file/:fileId', async (req, res) => {
         } catch (err) {}
     }
     
-    if (!filePath) {
-        return res.status(404).json({ error: 'Fayl tapılmadı' });
-    }
+    if (!filePath) return res.status(404).json({ error: 'Fayl tapılmadı' });
     
     res.download(filePath, async (err) => {
-        if (err) console.error('Fayl xətası:', err);
-        try {
-            await fs.unlink(filePath);
-            console.log(`🗑️ Fayl silindi: ${filePath}`);
-        } catch (cleanErr) {}
+        try { await fs.unlink(filePath); } catch (cleanErr) {}
     });
 });
 
-// ANA SƏHİFƏ
 app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Video Downloader API işləyir!',
-        platforms: ['YouTube', 'TikTok', 'Instagram', 'Facebook'],
-        endpoints: {
-            health: 'GET /api/health',
-            info: 'POST /api/info',
-            downloadStart: 'POST /api/download/start',
-            downloadFile: 'GET /api/download/file/:fileId'
-        }
-    });
+    res.json({ message: 'Video Downloader API işləyir!' });
 });
 
 app.listen(PORT, () => {
     console.log(`🚀 Server ${PORT} portunda işləyir`);
-    console.log(`📁 TMP: ${tmpDir}`);
 });
