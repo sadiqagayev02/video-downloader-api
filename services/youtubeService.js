@@ -3,80 +3,111 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 
 class YouTubeService {
-  async getVideoInfo(url) {
-    try {
-      // Video məlumatlarını JSON olaraq al
-      const { stdout } = await execPromise(`yt-dlp -j "${url}"`, { 
-        timeout: 30000,
-        maxBuffer: 10 * 1024 * 1024
-      });
-      
-      const info = JSON.parse(stdout);
-      
-      const qualities = [];
-      const formats = info.formats || [];
-      
-      // Keyfiyyətləri yığ
-      for (const f of formats) {
-        if (f.height && f.vcodec !== 'none') {
-          const label = `${f.height}p`;
-          if (!qualities.find(q => q.value === label)) {
-            qualities.push({ label: label, value: label });
-          }
-        }
-      }
-      
-      // Böyükdən kiçiyə sırala
-      qualities.sort((a, b) => parseInt(b.value) - parseInt(a.value));
-      
-      // Audio əlavə et
-      qualities.push({ label: 'Audio (MP3)', value: 'audio' });
-      
-      return {
-        title: info.title || 'YouTube Video',
-        thumbnail: info.thumbnail || '',
-        duration: this.formatDuration(info.duration || 0),
-        platform: 'youtube',
-        uploader: info.uploader || 'Unknown',
-        qualities: qualities.slice(0, 6)
-      };
-    } catch (error) {
-      console.error('Info error:', error.message);
-      throw new Error('YouTube məlumatları alınmadı');
-    }
-  }
 
-  async getDownloadUrl(url, quality) {
-    try {
-      let format;
-      
-      if (quality === 'audio') {
-        format = 'bestaudio';
+  async getVideoInfo(url) {
+    // Sadəcə JSON məlumat al, heç nə yükləmə
+    const { stdout } = await execPromise(
+      `yt-dlp --dump-json --no-playlist --socket-timeout 30 "${url}"`,
+      { timeout: 35000, maxBuffer: 15 * 1024 * 1024 }
+    );
+
+    const info = JSON.parse(stdout);
+    const formats = info.formats || [];
+
+    const seen = new Set();
+    const qualities = [];
+
+    // Ayrı video+audio formatları (DASH — 1080p üçün)
+    const videoOnly = formats.filter(f =>
+      f.vcodec && f.vcodec !== 'none' &&
+      (f.acodec === 'none' || !f.acodec) &&
+      f.height && f.url
+    );
+
+    // Birləşmiş formatlar (720p, 480p və s.)
+    const combined = formats.filter(f =>
+      f.vcodec && f.vcodec !== 'none' &&
+      f.acodec && f.acodec !== 'none' &&
+      f.height && f.url
+    );
+
+    // Ən yaxşı audio
+    const bestAudio = formats
+      .filter(f => f.acodec && f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec) && f.url)
+      .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+    // 1080p — DASH (video + audio ayrı URL)
+    const v1080 = videoOnly
+      .filter(f => f.height >= 1080)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+    if (v1080 && bestAudio && !seen.has('1080p')) {
+      seen.add('1080p');
+      qualities.push({
+        quality: '1080p',
+        isDash: true,
+        videoUrl: v1080.url,
+        audioUrl: bestAudio.url,
+        filesize: (v1080.filesize || 0) + (bestAudio.filesize || 0),
+      });
+    }
+
+    // 720p, 480p, 360p
+    for (const height of [720, 480, 360]) {
+      const label = `${height}p`;
+      if (seen.has(label)) continue;
+
+      const match = combined
+        .filter(f => f.height <= height && f.height >= height * 0.85)
+        .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+      if (match) {
+        seen.add(label);
+        qualities.push({
+          quality: label,
+          isDash: false,
+          videoUrl: match.url,
+          audioUrl: null,
+          filesize: match.filesize || null,
+        });
       } else {
-        const height = parseInt(quality);
-        if (!isNaN(height)) {
-          format = `bestvideo[height<=${height}]+bestaudio`;
-        } else {
-          format = 'best';
+        // Birləşmiş yoxdursa DASH istifadə et
+        const vOnly = videoOnly
+          .filter(f => f.height <= height && f.height >= height * 0.85)
+          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+        if (vOnly && bestAudio) {
+          seen.add(label);
+          qualities.push({
+            quality: label,
+            isDash: true,
+            videoUrl: vOnly.url,
+            audioUrl: bestAudio.url,
+            filesize: (vOnly.filesize || 0) + (bestAudio.filesize || 0),
+          });
         }
       }
-      
-      // Sadəcə URL almaq üçün
-      const { stdout } = await execPromise(`yt-dlp -g -f "${format}" "${url}"`, {
-        timeout: 30000
-      });
-      
-      const videoUrl = stdout.trim().split('\n')[0];
-      
-      if (!videoUrl) {
-        throw new Error('URL alınmadı');
-      }
-      
-      return videoUrl;
-    } catch (error) {
-      console.error('Download error:', error.message);
-      throw new Error('Download URL alınmadı');
     }
+
+    // Audio only
+    if (bestAudio) {
+      qualities.push({
+        quality: 'audio',
+        isDash: false,
+        videoUrl: null,
+        audioUrl: bestAudio.url,
+        filesize: bestAudio.filesize || null,
+      });
+    }
+
+    return {
+      title: info.title || 'YouTube Video',
+      thumbnail: info.thumbnail || '',
+      duration: this.formatDuration(info.duration || 0),
+      platform: 'youtube',
+      uploader: info.uploader || '',
+      qualities,
+    };
   }
 
   formatDuration(seconds) {
