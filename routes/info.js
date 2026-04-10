@@ -1,74 +1,51 @@
-// routes/info.js
-const express = require('express');
-const router = express.Router();
-const youtubeService = require('../services/youtubeService');   // ← yeni ad
-const instagramService = require('../services/instagramService');
-const tiktokService = require('../services/tiktokService');
-const facebookService = require('../services/facebookService');
-
-// URL-dən platformanı müəyyən et
-function detectPlatform(url) {
-  if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('tiktok.com'))    return 'tiktok';
-  if (url.includes('instagram.com')) return 'instagram';
-  if (url.includes('facebook.com') || url.includes('fb.watch')) return 'facebook';
-  return 'youtube'; // default — yt-dlp çoxunu dəstəkləyir
-}
-
-router.post('/', async (req, res) => {
+app.post('/api/info', async (req, res) => {
   const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
-  if (!url || typeof url !== 'string' || !url.startsWith('http')) {
-    return res.status(400).json({ success: false, error: 'Düzgün URL daxil edin' });
-  }
-
-  const platform = detectPlatform(url.trim());
-  console.log(`📡 [${platform.toUpperCase()}] Məlumat sorğusu: ${url}`);
+  console.log(`📡 Məlumat: ${url}`);
 
   try {
-    let result;
+    const result = await fetchInfo(url);
+    let qualities = [];
+    let title = 'Video';
+    let thumbnail = '';
+    let duration = '00:00';
+    let platform = 'youtube';
+    let uploader = '';
 
-    switch (platform) {
-      case 'tiktok':
-        result = await tiktokService.getInfo(url);
-        break;
-      case 'instagram':
-        result = await instagramService.getInfo(url);
-        break;
-      case 'facebook':
-        result = await facebookService.getInfo(url);
-        break;
-      default:
-        result = await youtubeService.getVideoInfo(url);   // ← yeni service
+    if (result._source === 'invidious') {
+      const d = result._rawData;
+      qualities = buildQualitiesFromInvidious(d);
+      title = d.title || 'Video';
+      thumbnail = d.videoThumbnails?.[0]?.url || '';
+      const secs = d.lengthSeconds || 0;
+      duration = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
+      uploader = d.author || '';
+      platform = 'youtube';
+    } else {
+      const d = result._rawData;
+      qualities = buildQualities(d, url);
+      title = d.title || 'Video';
+      thumbnail = d.thumbnail || '';
+      duration = d.duration
+        ? `${Math.floor(d.duration / 60)}:${(d.duration % 60).toString().padStart(2, '0')}`
+        : '00:00';
+      uploader = d.uploader || d.channel || '';
+      if (url.includes('tiktok.com')) platform = 'tiktok';
+      else if (url.includes('instagram.com')) platform = 'instagram';
+      else if (url.includes('facebook.com')) platform = 'facebook';
     }
 
-    console.log(`✅ [${platform.toUpperCase()}] "${result.title}" — ${result.qualities?.length ?? 0} keyfiyyət`);
+    if (qualities.length === 0) {
+      return res.status(404).json({ success: false, error: 'Format tapılmadı' });
+    }
 
-    return res.json({ success: true, data: result });
-
-  } catch (err) {
-    console.error(`❌ [${platform.toUpperCase()}] Xəta:`, err.message);
-    return res.status(500).json({
-      success: false,
-      error: mapError(err.message),
+    res.json({
+      success: true,
+      data: { title, thumbnail, duration, platform, uploader, qualities },
     });
+  } catch (err) {
+    console.error(`❌ /api/info xətası: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
-
-// Xəta mesajlarını istifadəçi üçün sadələşdir
-function mapError(msg) {
-  if (!msg) return 'Naməlum xəta';
-  if (msg.includes('Sign in') || msg.includes('bot') || msg.includes('blocked'))
-    return 'YouTube bu videonu blokladı. Bir az sonra cəhd edin';
-  if (msg.includes('Private'))
-    return 'Bu video özəldir';
-  if (msg.includes('429') || msg.includes('Too Many'))
-    return 'Həddən çox sorğu — bir neçə saniyə gözləyin';
-  if (msg.includes('Unavailable') || msg.includes('not available'))
-    return 'Video mövcud deyil və ya silinib';
-  if (msg.includes('timeout') || msg.includes('ETIMEDOUT'))
-    return 'Serverlə əlaqə zaman aşımına uğradı';
-  return msg;
-}
-
-module.exports = router;
