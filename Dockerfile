@@ -5,8 +5,8 @@ RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 RUN pip3 install -U yt-dlp --break-system-packages
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --legacy-peer-deps --prefer-offline || npm install --legacy-peer-deps
+COPY package.json ./
+RUN npm install --no-package-lock
 COPY . .
 RUN mkdir -p /tmp/video-downloader /tmp/yt-cookies
 
