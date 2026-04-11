@@ -6,7 +6,7 @@ RUN pip3 install -U yt-dlp --break-system-packages
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm install --legacy-peer-deps --prefer-offline || npm install --legacy-peer-deps
 COPY . .
 RUN mkdir -p /tmp/video-downloader /tmp/yt-cookies
 
