@@ -15,12 +15,10 @@ const COOKIE_PATH = '/tmp/yt-cookies/youtube.txt';
 app.use(cors());
 app.use(express.json());
 
-// TMP qovluqları
 fs.mkdirSync(tmpDir, { recursive: true });
 fs.mkdirSync('/tmp/yt-cookies', { recursive: true });
 console.log(`✅ TMP: ${tmpDir}`);
 
-// Cookie (əgər varsa)
 if (process.env.YOUTUBE_COOKIE_BASE64) {
   try {
     const content = Buffer.from(process.env.YOUTUBE_COOKIE_BASE64, 'base64').toString('utf8');
@@ -40,15 +38,16 @@ function getCookieArg() {
   }
 }
 
-// ─── Invidious instanceləri ───────────────────────────────────────────────────
-const INVIDIOUS_INSTANCES = [
-  'https://invidious.snopyta.org',
-  'https://vid.puffyan.us',
-  'https://invidious.kavin.rocks',
-  'https://yt.artemislena.eu',
-  'https://invidious.flokinet.to',
-  'https://invidious.nerdvpn.de',
-  'https://inv.nadeko.net',
+// ─── Piped instanceləri ───────────────────────────────────────────────────────
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.moomoo.me',
+  'https://pipedapi.syncpundit.io',
+  'https://api.piped.projectsegfau.lt',
+  'https://pipedapi.bocchi.rocks',
+  'https://pipedapi.darkness.services',
+  'https://piped-api.garudalinux.org',
 ];
 
 function extractVideoId(url) {
@@ -66,15 +65,15 @@ function extractVideoId(url) {
   }
 }
 
-async function fetchYouTubeViaInvidious(videoId) {
-  for (const instance of INVIDIOUS_INSTANCES) {
+async function fetchYouTubeViaPiped(videoId) {
+  for (const instance of PIPED_INSTANCES) {
     try {
-      console.log(`🔄 Invidious: ${instance}`);
+      console.log(`🔄 Piped: ${instance}`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
 
       const response = await fetch(
-        `${instance}/api/v1/videos/${videoId}`,
+        `${instance}/streams/${videoId}`,
         { signal: controller.signal }
       );
       clearTimeout(timeout);
@@ -90,28 +89,28 @@ async function fetchYouTubeViaInvidious(videoId) {
         continue;
       }
 
-      console.log(`✅ Invidious uğurlu: ${instance}`);
+      console.log(`✅ Piped uğurlu: ${instance}`);
       return data;
     } catch (e) {
       console.log(`❌ ${instance}: ${e.message.substring(0, 80)}`);
     }
   }
-  throw new Error('Bütün Invidious serverləri cavab vermədi');
+  throw new Error('Bütün Piped serverləri cavab vermədi');
 }
 
-function buildQualitiesFromInvidious(data) {
+function buildQualitiesFromPiped(data) {
   const result = [];
-  const adaptiveFormats = data.adaptiveFormats || [];
-  const formatStreams = data.formatStreams || [];
+  const videoStreams = data.videoStreams || [];
+  const audioStreams = data.audioStreams || [];
   const added = new Set();
   const heights = [2160, 1440, 1080, 720, 480, 360];
 
-  // formatStreams — audio+video birlikdə (progressiv)
   for (const h of heights) {
-    const f = formatStreams.find(x => {
-      const res = x.resolution || '';
-      return res === `${h}p` || parseInt(res) === h;
-    });
+    const f = videoStreams.find(x =>
+      x.quality === `${h}p` ||
+      x.quality === `${h}p60` ||
+      parseInt(x.quality) === h
+    );
     if (f && f.url && !added.has(h)) {
       added.add(h);
       let label = `${h}p`;
@@ -122,32 +121,7 @@ function buildQualitiesFromInvidious(data) {
         label,
         value: String(h),
         url: f.url,
-        filesize: f.clen ? parseInt(f.clen) : 0,
-        ext: 'mp4',
-        needsMerge: false,
-      });
-    }
-  }
-
-  // adaptiveFormats — video-only (yüksək keyfiyyət)
-  for (const h of heights) {
-    if (added.has(h)) continue;
-    const f = adaptiveFormats.find(x =>
-      x.type && x.type.startsWith('video/') &&
-      x.url &&
-      (x.resolution === `${h}p` || parseInt(x.resolution) === h)
-    );
-    if (f) {
-      added.add(h);
-      let label = `${h}p`;
-      if (h === 2160) label = '4K Ultra HD';
-      else if (h === 1080) label = '1080p Full HD';
-      else if (h === 720) label = '720p HD';
-      result.push({
-        label,
-        value: String(h),
-        url: f.url,
-        filesize: f.clen ? parseInt(f.clen) : 0,
+        filesize: f.contentLength ? parseInt(f.contentLength) : 0,
         ext: 'mp4',
         needsMerge: false,
       });
@@ -155,17 +129,16 @@ function buildQualitiesFromInvidious(data) {
   }
 
   // Audio only
-  const audioFormats = adaptiveFormats
-    .filter(f => f.type && f.type.startsWith('audio/') && f.url)
-    .sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
+  const bestAudio = [...audioStreams].sort(
+    (a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0)
+  )[0];
 
-  if (audioFormats.length > 0) {
-    const a = audioFormats[0];
+  if (bestAudio) {
     result.push({
       label: 'Yalnız səs',
       value: 'audio',
-      url: a.url,
-      filesize: a.clen ? parseInt(a.clen) : 0,
+      url: bestAudio.url,
+      filesize: bestAudio.contentLength ? parseInt(bestAudio.contentLength) : 0,
       ext: 'm4a',
       needsMerge: false,
     });
@@ -174,7 +147,7 @@ function buildQualitiesFromInvidious(data) {
   return result;
 }
 
-// ─── yt-dlp ilə non-YouTube ───────────────────────────────────────────────────
+// ─── yt-dlp (TikTok / Instagram / Facebook) ───────────────────────────────────
 async function fetchInfoYtdlp(url) {
   const cookie = getCookieArg();
   let extraArgs = '';
@@ -300,13 +273,13 @@ app.post('/api/info', async (req, res) => {
       const videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'YouTube video ID tapılmadı' });
 
-      const data = await fetchYouTubeViaInvidious(videoId);
-      qualities = buildQualitiesFromInvidious(data);
+      const data = await fetchYouTubeViaPiped(videoId);
+      qualities = buildQualitiesFromPiped(data);
       title = data.title || 'Video';
-      thumbnail = data.videoThumbnails?.[0]?.url || '';
-      const secs = data.lengthSeconds || 0;
+      thumbnail = data.thumbnailUrl || '';
+      const secs = data.duration || 0;
       duration = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
-      uploader = data.author || '';
+      uploader = data.uploader || '';
       platform = 'youtube';
     } else {
       const data = await fetchInfoYtdlp(url);
@@ -335,7 +308,7 @@ app.post('/api/info', async (req, res) => {
   }
 });
 
-// ─── Download start (fallback) ────────────────────────────────────────────────
+// ─── Download start ───────────────────────────────────────────────────────────
 app.post('/api/download/start', async (req, res) => {
   const { url, quality } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
