@@ -1,7 +1,7 @@
 {
   "name": "video-downloader-backend",
   "version": "1.0.0",
-  "description": "Video downloader API with merge support",
+  "description": "Video downloader API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
