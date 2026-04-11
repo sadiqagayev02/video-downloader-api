@@ -38,16 +38,24 @@ function getCookieArg() {
   }
 }
 
-const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.moomoo.me',
-  'https://pipedapi.syncpundit.io',
-  'https://api.piped.projectsegfau.lt',
-  'https://pipedapi.bocchi.rocks',
-  'https://pipedapi.darkness.services',
-  'https://piped-api.garudalinux.org',
-];
+// ─── YouTube Innertube client (bir dəfə yaradılır, cached) ───────────────────
+let ytClient = null;
+
+async function getYouTubeClient() {
+  if (ytClient) return ytClient;
+  console.log('🔧 Innertube client yaradılır...');
+  const { Innertube } = await import('youtubei.js');
+  ytClient = await Innertube.create({
+    lang: 'en',
+    location: 'US',
+    retrieve_player: true,
+  });
+  console.log('✅ Innertube client hazırdır');
+  return ytClient;
+}
+
+// Server başlayanda client-i əvvəlcədən yarat (ilk sorğu sürətli olsun)
+getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
 
 function extractVideoId(url) {
   try {
@@ -64,48 +72,16 @@ function extractVideoId(url) {
   }
 }
 
-async function fetchYouTubeViaPiped(videoId) {
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      console.log(`🔄 Piped: ${instance}`);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const response = await fetch(
-        `${instance}/streams/${videoId}`,
-        { signal: controller.signal }
-      );
-      clearTimeout(timeout);
-      if (!response.ok) {
-        console.log(`❌ ${instance}: HTTP ${response.status}`);
-        continue;
-      }
-      const data = await response.json();
-      if (!data || data.error) {
-        console.log(`❌ ${instance}: ${data?.error || 'boş cavab'}`);
-        continue;
-      }
-      console.log(`✅ Piped uğurlu: ${instance}`);
-      return data;
-    } catch (e) {
-      console.log(`❌ ${instance}: ${e.message.substring(0, 80)}`);
-    }
-  }
-  throw new Error('Bütün Piped serverləri cavab vermədi');
-}
-
-function buildQualitiesFromPiped(data) {
+function buildQualitiesFromInnertube(info) {
   const result = [];
-  const videoStreams = data.videoStreams || [];
-  const audioStreams = data.audioStreams || [];
+  const adaptiveFormats = info.streaming_data?.adaptive_formats || [];
+  const basicFormats = info.streaming_data?.formats || [];
   const added = new Set();
   const heights = [2160, 1440, 1080, 720, 480, 360];
 
+  // Progressiv (audio+video birlikdə) — ən sürətli yükləmə
   for (const h of heights) {
-    const f = videoStreams.find(x =>
-      x.quality === `${h}p` ||
-      x.quality === `${h}p60` ||
-      parseInt(x.quality) === h
-    );
+    const f = basicFormats.find(x => x.height === h);
     if (f && f.url && !added.has(h)) {
       added.add(h);
       let label = `${h}p`;
@@ -116,23 +92,49 @@ function buildQualitiesFromPiped(data) {
         label,
         value: String(h),
         url: f.url,
-        filesize: f.contentLength ? parseInt(f.contentLength) : 0,
+        filesize: f.content_length ? parseInt(f.content_length) : 0,
         ext: 'mp4',
         needsMerge: false,
       });
     }
   }
 
-  const bestAudio = [...audioStreams].sort(
-    (a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0)
-  )[0];
+  // Adaptive video-only (yüksək keyfiyyət)
+  for (const h of heights) {
+    if (added.has(h)) continue;
+    const f = adaptiveFormats.find(x =>
+      x.height === h &&
+      x.mime_type?.startsWith('video/')
+    );
+    if (f && f.url) {
+      added.add(h);
+      let label = `${h}p`;
+      if (h === 2160) label = '4K Ultra HD';
+      else if (h === 1080) label = '1080p Full HD';
+      else if (h === 720) label = '720p HD';
+      result.push({
+        label,
+        value: String(h),
+        url: f.url,
+        filesize: f.content_length ? parseInt(f.content_length) : 0,
+        ext: 'mp4',
+        needsMerge: false,
+      });
+    }
+  }
 
-  if (bestAudio) {
+  // Audio only
+  const audioFormats = adaptiveFormats
+    .filter(f => f.mime_type?.startsWith('audio/') && f.url)
+    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+  if (audioFormats.length > 0) {
+    const a = audioFormats[0];
     result.push({
       label: 'Yalnız səs',
       value: 'audio',
-      url: bestAudio.url,
-      filesize: bestAudio.contentLength ? parseInt(bestAudio.contentLength) : 0,
+      url: a.url,
+      filesize: a.content_length ? parseInt(a.content_length) : 0,
       ext: 'm4a',
       needsMerge: false,
     });
@@ -141,6 +143,7 @@ function buildQualitiesFromPiped(data) {
   return result;
 }
 
+// ─── yt-dlp (TikTok / Instagram / Facebook) ──────────────────────────────────
 async function fetchInfoYtdlp(url) {
   const cookie = getCookieArg();
   let extraArgs = '';
@@ -238,10 +241,12 @@ function buildQualitiesYtdlp(data, url) {
   return result;
 }
 
+// ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ─── Info ─────────────────────────────────────────────────────────────────────
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
@@ -261,13 +266,15 @@ app.post('/api/info', async (req, res) => {
       const videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'YouTube video ID tapılmadı' });
 
-      const data = await fetchYouTubeViaPiped(videoId);
-      qualities = buildQualitiesFromPiped(data);
-      title = data.title || 'Video';
-      thumbnail = data.thumbnailUrl || '';
-      const secs = data.duration || 0;
+      const client = await getYouTubeClient();
+      const info = await client.getInfo(videoId);
+
+      qualities = buildQualitiesFromInnertube(info);
+      title = info.basic_info?.title || 'Video';
+      thumbnail = info.basic_info?.thumbnail?.[0]?.url || '';
+      const secs = info.basic_info?.duration || 0;
       duration = `${Math.floor(secs / 60)}:${(secs % 60).toString().padStart(2, '0')}`;
-      uploader = data.uploader || '';
+      uploader = info.basic_info?.author || '';
       platform = 'youtube';
     } else {
       const data = await fetchInfoYtdlp(url);
@@ -296,6 +303,7 @@ app.post('/api/info', async (req, res) => {
   }
 });
 
+// ─── Download start ───────────────────────────────────────────────────────────
 app.post('/api/download/start', async (req, res) => {
   const { url, quality } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
@@ -340,6 +348,7 @@ app.post('/api/download/start', async (req, res) => {
   }
 });
 
+// ─── Download file ────────────────────────────────────────────────────────────
 app.get('/api/download/file/:fileId', (req, res) => {
   const { fileId } = req.params;
   for (const ext of ['mp4', 'm4a']) {
