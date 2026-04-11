@@ -1,19 +1,13 @@
 {
   "name": "video-downloader-backend",
   "version": "1.0.0",
-  "description": "Video downloader API",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "express-rate-limit": "^7.1.5"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "express": "4.18.2",
+    "cors": "2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
