@@ -38,7 +38,6 @@ function getCookieArg() {
   }
 }
 
-// ─── Piped instanceləri ───────────────────────────────────────────────────────
 const PIPED_INSTANCES = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.tokhmi.xyz',
@@ -71,24 +70,20 @@ async function fetchYouTubeViaPiped(videoId) {
       console.log(`🔄 Piped: ${instance}`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
-
       const response = await fetch(
         `${instance}/streams/${videoId}`,
         { signal: controller.signal }
       );
       clearTimeout(timeout);
-
       if (!response.ok) {
         console.log(`❌ ${instance}: HTTP ${response.status}`);
         continue;
       }
-
       const data = await response.json();
       if (!data || data.error) {
         console.log(`❌ ${instance}: ${data?.error || 'boş cavab'}`);
         continue;
       }
-
       console.log(`✅ Piped uğurlu: ${instance}`);
       return data;
     } catch (e) {
@@ -128,7 +123,6 @@ function buildQualitiesFromPiped(data) {
     }
   }
 
-  // Audio only
   const bestAudio = [...audioStreams].sort(
     (a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0)
   )[0];
@@ -147,7 +141,6 @@ function buildQualitiesFromPiped(data) {
   return result;
 }
 
-// ─── yt-dlp (TikTok / Instagram / Facebook) ───────────────────────────────────
 async function fetchInfoYtdlp(url) {
   const cookie = getCookieArg();
   let extraArgs = '';
@@ -168,7 +161,6 @@ function buildQualitiesYtdlp(data, url) {
     const vids = formats
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.url)
       .sort((a, b) => (b.height || 0) - (a.height || 0));
-
     if (vids.length > 0) {
       const f = vids[0];
       return [{
@@ -191,7 +183,6 @@ function buildQualitiesYtdlp(data, url) {
     return [];
   }
 
-  // TikTok / Facebook
   const progressive = formats.filter(f =>
     f.vcodec && f.vcodec !== 'none' &&
     f.acodec && f.acodec !== 'none' &&
@@ -247,18 +238,15 @@ function buildQualitiesYtdlp(data, url) {
   return result;
 }
 
-// ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ─── Info ─────────────────────────────────────────────────────────────────────
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
   console.log(`📡 Məlumat: ${url}`);
-
   const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
 
   try {
@@ -308,7 +296,6 @@ app.post('/api/info', async (req, res) => {
   }
 });
 
-// ─── Download start ───────────────────────────────────────────────────────────
 app.post('/api/download/start', async (req, res) => {
   const { url, quality } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
@@ -353,7 +340,6 @@ app.post('/api/download/start', async (req, res) => {
   }
 });
 
-// ─── Download file ────────────────────────────────────────────────────────────
 app.get('/api/download/file/:fileId', (req, res) => {
   const { fileId } = req.params;
   for (const ext of ['mp4', 'm4a']) {
