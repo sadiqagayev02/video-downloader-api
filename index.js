@@ -38,7 +38,7 @@ function getCookieArg() {
   }
 }
 
-// ─── YouTube Innertube client (bir dəfə yaradılır, cached) ───────────────────
+// ─── YouTube Innertube client ─────────────────────────────────────────────────
 let ytClient = null;
 
 async function getYouTubeClient() {
@@ -54,24 +54,20 @@ async function getYouTubeClient() {
   return ytClient;
 }
 
-// Server başlayanda client-i əvvəlcədən yarat (ilk sorğu sürətli olsun)
 getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
 
 function extractVideoId(url) {
   try {
     const uri = new URL(url);
-    if (uri.hostname === 'youtu.be') {
-      return uri.pathname.slice(1).split('?')[0];
-    }
-    if (uri.pathname.includes('/shorts/')) {
-      return uri.pathname.split('/shorts/')[1].split('?')[0];
-    }
+    if (uri.hostname === 'youtu.be') return uri.pathname.slice(1).split('?')[0];
+    if (uri.pathname.includes('/shorts/')) return uri.pathname.split('/shorts/')[1].split('?')[0];
     return uri.searchParams.get('v');
   } catch {
     return null;
   }
 }
 
+// ─── YouTube keyfiyyətləri (Innertube) ───────────────────────────────────────
 function buildQualitiesFromInnertube(info) {
   const result = [];
   const adaptiveFormats = info.streaming_data?.adaptive_formats || [];
@@ -79,17 +75,13 @@ function buildQualitiesFromInnertube(info) {
   const added = new Set();
   const heights = [2160, 1440, 1080, 720, 480, 360];
 
-  // Progressiv (audio+video birlikdə) — ən sürətli yükləmə
+  // Progressiv (audio+video birlikdə)
   for (const h of heights) {
     const f = basicFormats.find(x => x.height === h);
-    if (f && f.url && !added.has(h)) {
+    if (f?.url && !added.has(h)) {
       added.add(h);
-      let label = `${h}p`;
-      if (h === 2160) label = '4K Ultra HD';
-      else if (h === 1080) label = '1080p Full HD';
-      else if (h === 720) label = '720p HD';
       result.push({
-        label,
+        label: h === 2160 ? '4K Ultra HD' : h === 1080 ? '1080p Full HD' : h === 720 ? '720p HD' : `${h}p`,
         value: String(h),
         url: f.url,
         filesize: f.content_length ? parseInt(f.content_length) : 0,
@@ -99,21 +91,14 @@ function buildQualitiesFromInnertube(info) {
     }
   }
 
-  // Adaptive video-only (yüksək keyfiyyət)
+  // Adaptive video-only
   for (const h of heights) {
     if (added.has(h)) continue;
-    const f = adaptiveFormats.find(x =>
-      x.height === h &&
-      x.mime_type?.startsWith('video/')
-    );
-    if (f && f.url) {
+    const f = adaptiveFormats.find(x => x.height === h && x.mime_type?.startsWith('video/'));
+    if (f?.url) {
       added.add(h);
-      let label = `${h}p`;
-      if (h === 2160) label = '4K Ultra HD';
-      else if (h === 1080) label = '1080p Full HD';
-      else if (h === 720) label = '720p HD';
       result.push({
-        label,
+        label: h === 2160 ? '4K Ultra HD' : h === 1080 ? '1080p Full HD' : h === 720 ? '720p HD' : `${h}p`,
         value: String(h),
         url: f.url,
         filesize: f.content_length ? parseInt(f.content_length) : 0,
@@ -129,12 +114,11 @@ function buildQualitiesFromInnertube(info) {
     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
   if (audioFormats.length > 0) {
-    const a = audioFormats[0];
     result.push({
-      label: 'Yalnız səs',
+      label: 'MP3 (Audio)',
       value: 'audio',
-      url: a.url,
-      filesize: a.content_length ? parseInt(a.content_length) : 0,
+      url: audioFormats[0].url,
+      filesize: audioFormats[0].content_length ? parseInt(audioFormats[0].content_length) : 0,
       ext: 'm4a',
       needsMerge: false,
     });
@@ -143,7 +127,7 @@ function buildQualitiesFromInnertube(info) {
   return result;
 }
 
-// ─── yt-dlp (TikTok / Instagram / Facebook) ──────────────────────────────────
+// ─── yt-dlp ilə info al (TikTok / Instagram / digər) ─────────────────────────
 async function fetchInfoYtdlp(url) {
   const cookie = getCookieArg();
   let extraArgs = '';
@@ -151,90 +135,87 @@ async function fetchInfoYtdlp(url) {
     extraArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
   }
   const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 30 ${cookie} ${extraArgs} "${url}"`;
-  console.log('📡 yt-dlp:', cmd);
+  console.log('📡 yt-dlp info:', url);
   const { stdout } = await execPromise(cmd, { timeout: 45000 });
   return JSON.parse(stdout.trim().split('\n')[0]);
 }
 
+// ─── TikTok / Instagram keyfiyyətləri ────────────────────────────────────────
 function buildQualitiesYtdlp(data, url) {
   const formats = data.formats || [];
   const result = [];
 
-  if (url.includes('instagram.com')) {
-    const vids = formats
+  if (url.includes('instagram.com') || url.includes('tiktok.com')) {
+    // Ən yaxşı video+audio birlikdə format
+    const best = formats
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.url)
-      .sort((a, b) => (b.height || 0) - (a.height || 0));
-    if (vids.length > 0) {
-      const f = vids[0];
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+    if (best) {
       return [{
-        label: f.height ? `${f.height}p` : 'HD',
-        value: String(f.height || 'best'),
-        url: f.url,
-        filesize: f.filesize || f.filesize_approx || 0,
+        label: best.height >= 720 ? 'HD Video' : 'SD Video',
+        value: 'video',
+        // URL saxlamıram — yükləmə zamanı yt-dlp özü alacaq (403 olmur)
+        url: null,
+        formatId: best.format_id,
+        filesize: best.filesize || best.filesize_approx || 0,
         ext: 'mp4',
         needsMerge: false,
+        _directDownload: true,  // yükləmə zamanı yt-dlp birbaşa işləyəcək
       }];
     }
-    if (formats.length > 0) {
-      const f = formats[formats.length - 1];
-      return [{
-        label: 'HD', value: 'best',
-        url: f.url, filesize: f.filesize || 0,
-        ext: f.ext || 'mp4', needsMerge: false,
-      }];
-    }
-    return [];
+
+    // Format tapılmadısa belə bir seçim qaytar — yt-dlp özü seçsin
+    return [{
+      label: 'Video',
+      value: 'video',
+      url: null,
+      formatId: 'best',
+      filesize: 0,
+      ext: 'mp4',
+      needsMerge: false,
+      _directDownload: true,
+    }];
   }
 
+  // Digər platformalar üçün
   const progressive = formats.filter(f =>
     f.vcodec && f.vcodec !== 'none' &&
     f.acodec && f.acodec !== 'none' &&
     f.url && !f.manifest_url
   );
-  const videoOnly = formats.filter(f =>
-    f.vcodec && f.vcodec !== 'none' &&
-    (!f.acodec || f.acodec === 'none') &&
-    f.url && !f.manifest_url
-  );
 
-  const heights = [2160, 1440, 1080, 720, 480, 360];
+  const heights = [2160, 1080, 720, 480, 360];
   const added = new Set();
 
   for (const h of heights) {
-    const f = progressive.find(x => x.height === h) || videoOnly.find(x => x.height === h);
+    const f = progressive.find(x => x.height === h);
     if (f && !added.has(h)) {
       added.add(h);
-      let label = `${h}p`;
-      if (h === 2160) label = '4K Ultra HD';
-      else if (h === 1080) label = '1080p Full HD';
-      else if (h === 720) label = '720p HD';
       result.push({
-        label, value: String(h),
-        url: f.url, filesize: f.filesize || f.filesize_approx || 0,
-        ext: f.ext || 'mp4', needsMerge: false,
+        label: h === 2160 ? '4K' : h === 1080 ? '1080p Full HD' : h === 720 ? '720p HD' : `${h}p`,
+        value: String(h),
+        url: f.url,
+        formatId: f.format_id,
+        filesize: f.filesize || f.filesize_approx || 0,
+        ext: f.ext || 'mp4',
+        needsMerge: false,
+        _directDownload: false,
       });
     }
-  }
-
-  const audios = formats
-    .filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none') && f.url)
-    .sort((a, b) => (b.abr || 0) - (a.abr || 0));
-
-  if (audios.length > 0) {
-    const a = audios[0];
-    result.push({
-      label: 'Yalnız səs', value: 'audio',
-      url: a.url, filesize: a.filesize || a.filesize_approx || 0,
-      ext: a.ext || 'm4a', needsMerge: false,
-    });
   }
 
   if (result.length === 0 && formats.length > 0) {
     const f = formats[formats.length - 1];
     result.push({
-      label: 'Best', value: 'best',
-      url: f.url, filesize: f.filesize || 0,
-      ext: f.ext || 'mp4', needsMerge: false,
+      label: 'Best',
+      value: 'best',
+      url: f.url || null,
+      formatId: f.format_id || 'best',
+      filesize: f.filesize || 0,
+      ext: f.ext || 'mp4',
+      needsMerge: false,
+      _directDownload: true,
     });
   }
 
@@ -309,32 +290,114 @@ app.post('/api/download/start', async (req, res) => {
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
 
   const fileId = crypto.randomBytes(16).toString('hex');
-  console.log(`📥 Download: ${url}, ${quality}`);
+  console.log(`📥 Download başladı: ${url}, keyfiyyət: ${quality}`);
+
+  const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
+  const isTikTok = url.includes('tiktok.com');
+  const isInstagram = url.includes('instagram.com');
+  const cookie = getCookieArg();
 
   try {
-    const data = await fetchInfoYtdlp(url);
-    let formatId = quality;
-
-    if (quality === 'audio') {
-      const a = (data.formats || []).find(f => f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'));
-      if (a) formatId = a.format_id;
-    } else {
-      const h = parseInt(quality);
-      const f = (data.formats || []).find(f => f.height === h && f.vcodec !== 'none');
-      if (f) formatId = f.format_id;
-    }
-
     const outputExt = quality === 'audio' ? 'm4a' : 'mp4';
     const outputPath = path.join(tmpDir, `out_${fileId}.${outputExt}`);
-    const cookie = getCookieArg();
+    let title = 'video';
 
-    await execPromise(
-      `yt-dlp -f "${formatId}" -o "${outputPath}" ${cookie} "${url}"`,
-      { timeout: 300000 }
-    );
+    if (isYoutube) {
+      // ── YouTube: Innertube URL-dən yüklə, uğursuzsa yt-dlp ────────────────
+      const videoId = extractVideoId(url);
+      let downloaded = false;
+
+      if (videoId) {
+        try {
+          const client = await getYouTubeClient();
+          const info = await client.getInfo(videoId);
+          title = info.basic_info?.title || 'video';
+
+          const adaptiveFormats = info.streaming_data?.adaptive_formats || [];
+          const basicFormats = info.streaming_data?.formats || [];
+
+          let targetUrl = null;
+
+          if (quality === 'audio') {
+            const audioFmt = adaptiveFormats
+              .filter(f => f.mime_type?.startsWith('audio/') && f.url)
+              .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+            if (audioFmt) targetUrl = audioFmt.url;
+          } else {
+            const h = parseInt(quality);
+            const fmt = basicFormats.find(f => f.height === h && f.url)
+              || adaptiveFormats.find(f => f.height === h && f.mime_type?.startsWith('video/') && f.url);
+            if (fmt) targetUrl = fmt.url;
+          }
+
+          if (targetUrl) {
+            console.log(`📥 Innertube URL ilə yükləmə: ${quality}`);
+            await execPromise(
+              `curl -L --max-time 300 --retry 2 -o "${outputPath}" "${targetUrl}"`,
+              { timeout: 310000 }
+            );
+            const stats = fs.statSync(outputPath);
+            if (stats.size > 0) downloaded = true;
+          }
+        } catch (innerErr) {
+          console.log(`⚠️ Innertube download uğursuz: ${innerErr.message} — yt-dlp cəhd edilir`);
+        }
+      }
+
+      // Innertube uğursuzsa yt-dlp ilə cəhd et
+      if (!downloaded) {
+        console.log(`📥 yt-dlp ilə YouTube yükləmə: ${quality}`);
+        let fmtArg = quality === 'audio'
+          ? 'bestaudio[ext=m4a]/bestaudio'
+          : `bestvideo[height=${quality}][ext=mp4]+bestaudio[ext=m4a]/best[height=${quality}]/best`;
+
+        await execPromise(
+          `yt-dlp -f "${fmtArg}" ${cookie} --merge-output-format mp4 -o "${outputPath}" "${url}"`,
+          { timeout: 300000 }
+        );
+      }
+
+    } else if (isTikTok || isInstagram) {
+      // ── TikTok / Instagram: yt-dlp birbaşa yükləyir (URL ayrıca alınmır) ──
+      console.log(`📥 ${isTikTok ? 'TikTok' : 'Instagram'} birbaşa yükləmə`);
+
+      let extraArgs = '';
+      if (isTikTok) {
+        extraArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
+      }
+
+      // Əvvəlcə title al
+      try {
+        const data = await fetchInfoYtdlp(url);
+        title = data.title || 'video';
+      } catch (_) {}
+
+      await execPromise(
+        `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
+        + `${extraArgs} ${cookie} --merge-output-format mp4 --no-playlist `
+        + `--retries 3 -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
+
+    } else {
+      // ── Digər platformalar ────────────────────────────────────────────────
+      console.log(`📥 Generic yükləmə`);
+      try {
+        const data = await fetchInfoYtdlp(url);
+        title = data.title || 'video';
+      } catch (_) {}
+
+      await execPromise(
+        `yt-dlp -f "best" ${cookie} -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
+    }
 
     const stats = fs.statSync(outputPath);
-    const safeTitle = (data.title || 'video').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 80);
+    if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
+
+    const safeTitle = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, '_').substring(0, 80) || 'video';
+    console.log(`✅ Tamamlandı: ${outputPath} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
 
     res.json({
       success: true,
@@ -342,8 +405,17 @@ app.post('/api/download/start', async (req, res) => {
       filename: `${safeTitle}.${outputExt}`,
       filesize: stats.size,
     });
+
   } catch (err) {
     console.error(`❌ Download xətası: ${err.message}`);
+    // Müvəqqəti faylları təmizlə
+    try {
+      fs.readdirSync(tmpDir).forEach(f => {
+        if (f.includes(fileId)) {
+          try { fs.unlinkSync(path.join(tmpDir, f)); } catch (_) {}
+        }
+      });
+    } catch (_) {}
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -351,7 +423,7 @@ app.post('/api/download/start', async (req, res) => {
 // ─── Download file ────────────────────────────────────────────────────────────
 app.get('/api/download/file/:fileId', (req, res) => {
   const { fileId } = req.params;
-  for (const ext of ['mp4', 'm4a']) {
+  for (const ext of ['mp4', 'm4a', 'mp3', 'webm']) {
     const filePath = path.join(tmpDir, `out_${fileId}.${ext}`);
     if (fs.existsSync(filePath)) {
       return res.download(filePath, () => {
