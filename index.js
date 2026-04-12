@@ -40,7 +40,6 @@ let ytClient = null;
 async function getYouTubeClient() {
   if (ytClient) return ytClient;
   const { Innertube } = await import('youtubei.js');
-  // retrieve_player: true — streaming_data ilə gəlir, real keyfiyyətlər üçün lazımdır
   ytClient = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
   console.log('✅ Innertube client hazırdır');
   return ytClient;
@@ -67,7 +66,28 @@ function formatDuration(secs) {
   return `${m}:${s.toString().padStart(2,'0')}`;
 }
 
-// Real mövcud keyfiyyətləri streaming_data-dan çıxar
+// ── FIX 1: TikTok foto URL-ni yoxla ─────────────────────────────────────────
+// vt.tiktok.com qısa linki redirect olandan sonra photo/ URL-ə çevrilə bilər
+// yt-dlp foto URL-lərini dəstəkləmir
+function isTikTokPhotoUrl(url) {
+  return url.includes('/photo/');
+}
+
+// Qısa TikTok linkini resolve et (redirect-i izlə)
+async function resolveTikTokUrl(url) {
+  if (!url.includes('vt.tiktok.com') && !url.includes('vm.tiktok.com')) return url;
+  try {
+    const { stdout } = await execPromise(
+      `curl -sI -L --max-redirs 5 "${url}" | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\\r'`,
+      { timeout: 10000 }
+    );
+    const resolved = stdout.trim();
+    return resolved || url;
+  } catch {
+    return url;
+  }
+}
+
 function extractYouTubeQualities(info) {
   const adaptive = info.streaming_data?.adaptive_formats || [];
   const basic    = info.streaming_data?.formats || [];
@@ -76,13 +96,11 @@ function extractYouTubeQualities(info) {
   const seen = new Set();
   const qualities = [];
 
-  // Bütün mövcud hündürlükləri topla
   const heights = new Set();
   for (const f of allFormats) {
     if (f.height && f.height > 0) heights.add(f.height);
   }
 
-  // Böyükdən kiçiyə sırala
   const sortedHeights = [...heights].sort((a, b) => b - a);
 
   for (const h of sortedHeights) {
@@ -102,10 +120,10 @@ function extractYouTubeQualities(info) {
     qualities.push({ label, value: String(h), ext: 'mp4' });
   }
 
-  // Audio (MP3) — həmişə sonda
   const hasAudio = adaptive.some(f => f.mime_type?.startsWith('audio/'));
   if (hasAudio) {
-    qualities.push({ label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' });
+    // ── FIX 2: value 'audio' olaraq göndər — backend bunu gözləyir ──────────
+    qualities.push({ label: 'MP3 (Audio)', value: 'audio', ext: 'mp3' });
   }
 
   return qualities;
@@ -133,19 +151,15 @@ app.post('/api/info', async (req, res) => {
       if (!videoId) return res.status(400).json({ error: 'Video ID tapılmadı' });
 
       const client = await getYouTubeClient();
-
-      // getInfo() — streaming_data ilə gəlir, real keyfiyyətlər üçün lazımdır
       const info = await client.getInfo(videoId);
-
       const qualities = extractYouTubeQualities(info);
 
-      // Streaming data gəlmədisə fallback
       const finalQualities = qualities.length > 0 ? qualities : [
         { label: '1080p Full HD', value: '1080', ext: 'mp4' },
         { label: '720p HD',       value: '720',  ext: 'mp4' },
         { label: '480p',          value: '480',  ext: 'mp4' },
         { label: '360p',          value: '360',  ext: 'mp4' },
-        { label: 'MP3 (Audio)',   value: 'audio',ext: 'm4a' },
+        { label: 'MP3 (Audio)',   value: 'audio', ext: 'mp3' },
       ];
 
       return res.json({
@@ -161,16 +175,24 @@ app.post('/api/info', async (req, res) => {
       });
     }
 
-    // ── TikTok / Instagram ────────────────────────────────────────────────────
-    if (isTikTok || isInstagram) {
-      const platform = isTikTok ? 'tiktok' : 'instagram';
+    // ── TikTok ────────────────────────────────────────────────────────────────
+    if (isTikTok) {
+      // ── FIX 1: Əvvəlcə URL-i resolve et, foto olub olmadığını yoxla ──────
+      const resolvedUrl = await resolveTikTokUrl(url);
+      console.log(`📡 TikTok resolved: ${resolvedUrl}`);
+
+      if (isTikTokPhotoUrl(resolvedUrl)) {
+        console.log('⚠️ TikTok foto URL-i — dəstəklənmir');
+        return res.status(422).json({
+          success: false,
+          error: 'Bu TikTok foto paylaşımıdır. Yalnız videolar yüklənə bilər.',
+        });
+      }
+
       let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
 
-      const extraArgs = isTikTok
-        ? '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"'
-        : '';
+      const extraArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
 
-      // Mövcud TikTok cookie faylını yoxla
       const tiktokCookiePath = '/tmp/tiktok-cookies/tiktok.txt';
       let tiktokCookieArg = '';
       try { fs.accessSync(tiktokCookiePath); tiktokCookieArg = `--cookies "${tiktokCookiePath}"`; }
@@ -179,6 +201,33 @@ app.post('/api/info', async (req, res) => {
       try {
         const printCmd = `yt-dlp --no-playlist --socket-timeout 15 `
           + `${extraArgs} ${tiktokCookieArg} `
+          + `--print "%(title)s|||%(thumbnail)s|||%(duration)s|||%(uploader)s" "${resolvedUrl}"`;
+
+        const { stdout } = await execPromise(printCmd, { timeout: 25000 });
+        const parts = stdout.trim().split('|||');
+        title     = parts[0]?.trim() || 'Video';
+        thumbnail = parts[1]?.trim() || '';
+        duration  = formatDuration(parseFloat(parts[2]) || 0);
+        uploader  = parts[3]?.trim() || '';
+      } catch (e) {
+        console.log(`⚠️ TikTok metadata xətası:`, e.message);
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          title, thumbnail, duration, platform: 'tiktok', uploader,
+          qualities: [{ label: 'HD Video', value: 'video', ext: 'mp4' }],
+        },
+      });
+    }
+
+    // ── Instagram ─────────────────────────────────────────────────────────────
+    if (isInstagram) {
+      let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
+
+      try {
+        const printCmd = `yt-dlp --no-playlist --socket-timeout 15 `
           + `--print "%(title)s|||%(thumbnail)s|||%(duration)s|||%(uploader)s" "${url}"`;
 
         const { stdout } = await execPromise(printCmd, { timeout: 25000 });
@@ -188,13 +237,13 @@ app.post('/api/info', async (req, res) => {
         duration  = formatDuration(parseFloat(parts[2]) || 0);
         uploader  = parts[3]?.trim() || '';
       } catch (e) {
-        console.log(`⚠️ ${platform} metadata xətası:`, e.message);
+        console.log(`⚠️ Instagram metadata xətası:`, e.message);
       }
 
       return res.json({
         success: true,
         data: {
-          title, thumbnail, duration, platform, uploader,
+          title, thumbnail, duration, platform: 'instagram', uploader,
           qualities: [{ label: 'HD Video', value: 'video', ext: 'mp4' }],
         },
       });
@@ -244,7 +293,17 @@ app.post('/api/download/start', async (req, res) => {
 
   console.log(`📥 Download: ${url} | keyfiyyət: ${quality}`);
 
-  // TikTok cookies Flutter-dən gəldisə müvəqqəti Netscape fayla yaz
+  // ── FIX 1: TikTok foto yoxlaması ──────────────────────────────────────────
+  if (isTikTok) {
+    const resolvedUrl = await resolveTikTokUrl(url);
+    if (isTikTokPhotoUrl(resolvedUrl)) {
+      return res.status(422).json({
+        success: false,
+        error: 'Bu TikTok foto paylaşımıdır. Yalnız videolar yüklənə bilər.',
+      });
+    }
+  }
+
   let tiktokCookiePath = null;
   let tiktokCookieArg = '';
   if (isTikTok && tiktokCookies && Array.isArray(tiktokCookies) && tiktokCookies.length > 0) {
@@ -270,15 +329,18 @@ app.post('/api/download/start', async (req, res) => {
   }
 
   try {
-    const outputExt  = quality === 'audio' ? 'm4a' : 'mp4';
+    // ── FIX 2: audio → mp3 çıxış formatı ────────────────────────────────────
+    // quality === 'audio' gəldikdə mp3 çıxar, m4a yox
+    const isAudio    = quality === 'audio' || quality === 'mp3';
+    const outputExt  = isAudio ? 'mp3' : 'mp4';
     const outputPath = path.join(tmpDir, `out_${fileId}.${outputExt}`);
     let title = 'video';
 
     if (isYoutube) {
       let fmtArg;
-      if (quality === 'audio') {
-        // AAC audio — .m4a formatı, bütün player-lər oxuyur
-        fmtArg = 'bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best';
+      if (isAudio) {
+        // ── FIX 2: MP3 üçün düzgün format + postprocessor ────────────────────
+        fmtArg = 'bestaudio/best';
       } else {
         const h = parseInt(quality);
         if (!isNaN(h)) {
@@ -298,19 +360,32 @@ app.post('/api/download/start', async (req, res) => {
         title = stdout.trim() || 'video';
       } catch (_) {}
 
-      console.log(`📥 YouTube yt-dlp: -f "${fmtArg}"`);
-      await execPromise(
-        `yt-dlp -f "${fmtArg}" ${cookie} --merge-output-format ${outputExt} `
-        + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+      console.log(`📥 YouTube yt-dlp: -f "${fmtArg}" → ${outputExt}`);
+
+      if (isAudio) {
+        // ── FIX 2: MP3-ə çevir ───────────────────────────────────────────────
+        await execPromise(
+          `yt-dlp -f "${fmtArg}" ${cookie} `
+          + `--extract-audio --audio-format mp3 --audio-quality 0 `
+          + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+          { timeout: 300000 }
+        );
+      } else {
+        await execPromise(
+          `yt-dlp -f "${fmtArg}" ${cookie} --merge-output-format mp4 `
+          + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+          { timeout: 300000 }
+        );
+      }
 
     } else if (isTikTok) {
       const tkArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
+      const resolvedUrl = await resolveTikTokUrl(url);
 
       try {
         const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${url}"`, { timeout: 15000 }
+          `yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${resolvedUrl}"`,
+          { timeout: 15000 }
         );
         title = stdout.trim() || 'video';
       } catch (_) {}
@@ -319,7 +394,7 @@ app.post('/api/download/start', async (req, res) => {
       await execPromise(
         `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
         + `${tkArgs} ${tiktokCookieArg} --merge-output-format mp4 `
-        + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        + `--no-playlist --retries 3 -o "${outputPath}" "${resolvedUrl}"`,
         { timeout: 300000 }
       );
 
