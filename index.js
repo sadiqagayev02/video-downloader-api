@@ -19,6 +19,7 @@ fs.mkdirSync(tmpDir, { recursive: true });
 fs.mkdirSync('/tmp/yt-cookies', { recursive: true });
 console.log(`✅ TMP: ${tmpDir}`);
 
+// ─── Cookie setup ─────────────────────────────────────────────────────────────
 if (process.env.YOUTUBE_COOKIE_BASE64) {
   try {
     const content = Buffer.from(process.env.YOUTUBE_COOKIE_BASE64, 'base64').toString('utf8');
@@ -38,13 +39,13 @@ function getCookieArg() {
   }
 }
 
-// ─── Innertube client ─────────────────────────────────────────────────────────
+// ─── Innertube client (yalnız YouTube metadata üçün) ─────────────────────────
 let ytClient = null;
 
 async function getYouTubeClient() {
   if (ytClient) return ytClient;
-  console.log('🔧 Innertube client yaradılır...');
   const { Innertube } = await import('youtubei.js');
+  // retrieve_player: false — stream URL-ləri almır, çox sürətlidir
   ytClient = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: false });
   console.log('✅ Innertube client hazırdır');
   return ytClient;
@@ -52,6 +53,7 @@ async function getYouTubeClient() {
 
 getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
 
+// ─── Yardımçılar ──────────────────────────────────────────────────────────────
 function extractVideoId(url) {
   try {
     const uri = new URL(url);
@@ -70,136 +72,121 @@ function formatDuration(secs) {
   return `${m}:${s.toString().padStart(2,'0')}`;
 }
 
-// ─── YouTube keyfiyyət siyahısı — URL saxlamadan, tez qaytarır ───────────────
-// Stream URL-ləri yükləmə zamanı yt-dlp alacaq
-function buildYouTubeQualities(info) {
-  const result = [];
-  const adaptive = info.streaming_data?.adaptive_formats || [];
-  const basic    = info.streaming_data?.formats || [];
-  const added    = new Set();
-  const heights  = [2160, 1440, 1080, 720, 480, 360];
+// YouTube üçün sabit keyfiyyət siyahısı — URL saxlamır, dərhal qaytarır
+// yt-dlp yükləmə zamanı mövcudluğu özü yoxlayacaq
+const YOUTUBE_QUALITIES = [
+  { label: '1080p Full HD', value: '1080', ext: 'mp4' },
+  { label: '720p HD',       value: '720',  ext: 'mp4' },
+  { label: '480p',          value: '480',  ext: 'mp4' },
+  { label: '360p',          value: '360',  ext: 'mp4' },
+  { label: 'MP3 (Audio)',   value: 'audio',ext: 'm4a' },
+];
 
-  for (const h of heights) {
-    const hasFmt = basic.find(x => x.height === h)
-                || adaptive.find(x => x.height === h && x.mime_type?.startsWith('video/'));
-    if (hasFmt && !added.has(h)) {
-      added.add(h);
-      result.push({
-        label: h === 2160 ? '4K Ultra HD'
-             : h === 1080 ? '1080p Full HD'
-             : h === 720  ? '720p HD'
-             : `${h}p`,
-        value: String(h),
-        ext: 'mp4',
-        needsMerge: false,
-        filesize: hasFmt.content_length ? parseInt(hasFmt.content_length) : 0,
-      });
-    }
-  }
-
-  const hasAudio = adaptive.some(f => f.mime_type?.startsWith('audio/'));
-  if (hasAudio) {
-    result.push({
-      label: 'MP3 (Audio)',
-      value: 'audio',
-      ext: 'm4a',
-      needsMerge: false,
-      filesize: 0,
-    });
-  }
-
-  return result;
-}
+// TikTok/Instagram üçün sabit keyfiyyət siyahısı
+const TIKTOK_QUALITIES = [
+  { label: 'HD Video', value: 'video', ext: 'mp4' },
+];
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ─── Info — mümkün qədər tez cavab ver ───────────────────────────────────────
+// ─── Info — SÜRƏTLI, yalnız metadata ─────────────────────────────────────────
+// Stream URL-ləri burada saxlanmır — 403 problemi yoxdur
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
   console.log(`📡 Info: ${url}`);
-  const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
+
+  const isYoutube   = url.includes('youtube.com') || url.includes('youtu.be');
+  const isTikTok    = url.includes('tiktok.com');
+  const isInstagram = url.includes('instagram.com');
 
   try {
+    // ── YouTube: getBasicInfo (~200-400ms) ────────────────────────────────
     if (isYoutube) {
-      // ── YouTube: retrieve_player=false ilə tez metadata al ────────────────
       const videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Video ID tapılmadı' });
 
-      const client = await getYouTubeClient();
+      let title = 'YouTube Video', thumbnail = '', duration = '00:00', uploader = '';
 
-      // getBasicInfo — streaming_data olmadan, çox tez (~300ms)
-      let info;
       try {
-        info = await client.getBasicInfo(videoId);
-      } catch {
-        info = await client.getInfo(videoId);
+        const client = await getYouTubeClient();
+        // getBasicInfo — retrieve_player:false ilə stream data gəlmir, ~300ms
+        const info = await client.getBasicInfo(videoId);
+        title     = info.basic_info?.title || title;
+        thumbnail = info.basic_info?.thumbnail?.[0]?.url || '';
+        duration  = formatDuration(info.basic_info?.duration || 0);
+        uploader  = info.basic_info?.author || '';
+      } catch (e) {
+        console.log('⚠️ Innertube xətası, fallback:', e.message);
+        // Innertube uğursuz olsa — sabit siyahını boş metadata ilə qaytır
+        // Yükləmə yenə işləyəcək çünki yt-dlp URL-dən alır
       }
-
-      const qualities = buildYouTubeQualities(info);
-      const secs = info.basic_info?.duration || 0;
-
-      // Əgər qualities boşdursa — standart siyahı qaytır
-      const fallbackQualities = qualities.length > 0 ? qualities : [
-        { label: '1080p Full HD', value: '1080', ext: 'mp4', needsMerge: false, filesize: 0 },
-        { label: '720p HD',       value: '720',  ext: 'mp4', needsMerge: false, filesize: 0 },
-        { label: '480p',          value: '480',  ext: 'mp4', needsMerge: false, filesize: 0 },
-        { label: '360p',          value: '360',  ext: 'mp4', needsMerge: false, filesize: 0 },
-        { label: 'MP3 (Audio)',   value: 'audio',ext: 'm4a', needsMerge: false, filesize: 0 },
-      ];
 
       return res.json({
         success: true,
-        data: {
-          title:    info.basic_info?.title || 'YouTube Video',
-          thumbnail: info.basic_info?.thumbnail?.[0]?.url || '',
-          duration: formatDuration(secs),
-          platform: 'youtube',
-          uploader: info.basic_info?.author || '',
-          qualities: fallbackQualities,
-        },
+        data: { title, thumbnail, duration, platform: 'youtube', uploader, qualities: YOUTUBE_QUALITIES },
       });
     }
 
-    // ── TikTok / Instagram / digər: yt-dlp ilə metadata al ──────────────────
-    const cookie = getCookieArg();
-    let extraArgs = '';
-    if (url.includes('tiktok.com')) {
-      extraArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
+    // ── TikTok / Instagram: --print ilə sürətli metadata (~1-2s) ─────────
+    // --dump-json 3-5s çəkir, --print çox sürətlidir
+    // CDN URL-ləri saxlanmır — 403 problemi yoxdur
+    if (isTikTok || isInstagram) {
+      const platform = isTikTok ? 'tiktok' : 'instagram';
+      let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
+
+      try {
+        const extraArgs = isTikTok
+          ? '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"'
+          : '';
+
+        // --print dump-json-dan 3x sürətlidir — yalnız lazımi sahələri alır
+        const printCmd = `yt-dlp --no-playlist --socket-timeout 15 ${extraArgs} `
+          + `--print "%(title)s|||%(thumbnail)s|||%(duration)s|||%(uploader)s" "${url}"`;
+
+        const { stdout } = await execPromise(printCmd, { timeout: 25000 });
+        const parts = stdout.trim().split('|||');
+
+        title     = parts[0]?.trim() || 'Video';
+        thumbnail = parts[1]?.trim() || '';
+        duration  = formatDuration(parseFloat(parts[2]) || 0);
+        uploader  = parts[3]?.trim() || '';
+      } catch (e) {
+        console.log(`⚠️ ${platform} metadata xətası:`, e.message);
+        // Xəta olsa boş metadata ilə qaytır — yükləmə yenə işləyir
+      }
+
+      return res.json({
+        success: true,
+        data: { title, thumbnail, duration, platform, uploader, qualities: TIKTOK_QUALITIES },
+      });
     }
 
-    const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 20 ${cookie} ${extraArgs} "${url}"`;
-    const { stdout } = await execPromise(cmd, { timeout: 35000 });
-    const data = JSON.parse(stdout.trim().split('\n')[0]);
-
-    let platform = 'other';
-    if (url.includes('tiktok.com'))    platform = 'tiktok';
-    else if (url.includes('instagram.com')) platform = 'instagram';
-    else if (url.includes('facebook.com'))  platform = 'facebook';
-    else if (url.includes('twitter.com') || url.includes('x.com')) platform = 'twitter';
-
-    // TikTok / Instagram üçün sadə keyfiyyət siyahısı — URL saxlamadan
-    const qualities = [{
-      label: 'HD Video',
-      value: 'video',
-      ext: 'mp4',
-      needsMerge: false,
-      filesize: 0,
-    }];
+    // ── Digər platformalar ────────────────────────────────────────────────
+    let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
+    try {
+      const { stdout } = await execPromise(
+        `yt-dlp --no-playlist --socket-timeout 15 --print "%(title)s|||%(thumbnail)s|||%(duration)s|||%(uploader)s" "${url}"`,
+        { timeout: 25000 }
+      );
+      const parts = stdout.trim().split('|||');
+      title     = parts[0]?.trim() || 'Video';
+      thumbnail = parts[1]?.trim() || '';
+      duration  = formatDuration(parseFloat(parts[2]) || 0);
+      uploader  = parts[3]?.trim() || '';
+    } catch (e) {
+      console.log('⚠️ Generic info xətası:', e.message);
+    }
 
     return res.json({
       success: true,
       data: {
-        title:    data.title || 'Video',
-        thumbnail: data.thumbnail || '',
-        duration: formatDuration(data.duration || 0),
-        platform,
-        uploader: data.uploader || data.channel || '',
-        qualities,
+        title, thumbnail, duration, platform: 'other', uploader,
+        qualities: [{ label: 'HD Video', value: 'video', ext: 'mp4' }],
       },
     });
 
@@ -214,8 +201,8 @@ app.post('/api/download/start', async (req, res) => {
   const { url, quality } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
 
-  const fileId = crypto.randomBytes(16).toString('hex');
-  const cookie = getCookieArg();
+  const fileId  = crypto.randomBytes(16).toString('hex');
+  const cookie  = getCookieArg();
   const isYoutube   = url.includes('youtube.com') || url.includes('youtu.be');
   const isTikTok    = url.includes('tiktok.com');
   const isInstagram = url.includes('instagram.com');
@@ -228,25 +215,28 @@ app.post('/api/download/start', async (req, res) => {
     let title = 'video';
 
     if (isYoutube) {
-      // ── YouTube: yt-dlp birbaşa yükləyir ─────────────────────────────────
-      // Innertube URL-ləri curl ilə yüklədikdə donur — yt-dlp daha etibarlıdır
+      // ── YouTube ───────────────────────────────────────────────────────────
+      // Innertube stream URL-ləri curl ilə işləmir (n parametri şifrəli)
+      // yt-dlp həm URL-i decode edir həm yükləyir — ən etibarlı yol
+
       let fmtArg;
       if (quality === 'audio') {
+        // MP3: ən yaxşı audio formatı
         fmtArg = 'bestaudio[ext=m4a]/bestaudio/best';
       } else {
         const h = parseInt(quality);
         if (!isNaN(h)) {
+          // Əvvəlcə həmin hündürlükdə mp4+m4a axtarır
+          // Tapılmasa — ən yaxın hündürlük
           fmtArg = `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/`
                  + `bestvideo[height=${h}]+bestaudio/`
-                 + `best[height=${h}]/best`;
+                 + `best[height<=${h}][ext=mp4]/best[height<=${h}]/best`;
         } else {
           fmtArg = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
         }
       }
 
-      console.log(`📥 YouTube yt-dlp: -f "${fmtArg}"`);
-
-      // Title al
+      // Title al (15s timeout, uğursuz olsa 'video' saxlanır)
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist ${cookie} "${url}"`,
@@ -255,6 +245,8 @@ app.post('/api/download/start', async (req, res) => {
         title = stdout.trim() || 'video';
       } catch (_) {}
 
+      console.log(`📥 YouTube yt-dlp: -f "${fmtArg}"`);
+
       await execPromise(
         `yt-dlp -f "${fmtArg}" ${cookie} --merge-output-format ${outputExt} `
         + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
@@ -262,8 +254,9 @@ app.post('/api/download/start', async (req, res) => {
       );
 
     } else if (isTikTok) {
-      // ── TikTok: yt-dlp birbaşa yükləyir — URL ayrıca alınmır ────────────
-      console.log('📥 TikTok birbaşa yükləmə');
+      // ── TikTok: yt-dlp həm URL alır həm yükləyir ─────────────────────────
+      // /api/info-da CDN URL saxlanmır, buna görə burada tazədən alınır
+      // Bu 403-ü tam aradan qaldırır
       const extraArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
 
       try {
@@ -274,17 +267,17 @@ app.post('/api/download/start', async (req, res) => {
         title = stdout.trim() || 'video';
       } catch (_) {}
 
+      console.log('📥 TikTok birbaşa yükləmə (yt-dlp)');
+
       await execPromise(
         `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
-        + `${extraArgs} ${cookie} --merge-output-format mp4 `
+        + `${extraArgs} --merge-output-format mp4 `
         + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
         { timeout: 300000 }
       );
 
     } else if (isInstagram) {
       // ── Instagram ─────────────────────────────────────────────────────────
-      console.log('📥 Instagram birbaşa yükləmə');
-
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist "${url}"`,
@@ -292,6 +285,8 @@ app.post('/api/download/start', async (req, res) => {
         );
         title = stdout.trim() || 'video';
       } catch (_) {}
+
+      console.log('📥 Instagram birbaşa yükləmə (yt-dlp)');
 
       await execPromise(
         `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
@@ -302,7 +297,6 @@ app.post('/api/download/start', async (req, res) => {
 
     } else {
       // ── Digər platformalar ────────────────────────────────────────────────
-      console.log('📥 Generic yükləmə');
       await execPromise(
         `yt-dlp -f "best" ${cookie} --no-playlist -o "${outputPath}" "${url}"`,
         { timeout: 300000 }
@@ -314,7 +308,7 @@ app.post('/api/download/start', async (req, res) => {
     if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
 
     const safeTitle = title
-      .replace(/[^\w\s\u0400-\u04FF-]/g, '')
+      .replace(/[^\w\s\u0400-\u04FF\u0100-\u024F-]/g, '')
       .replace(/\s+/g, '_')
       .substring(0, 80) || 'video';
 
@@ -329,6 +323,7 @@ app.post('/api/download/start', async (req, res) => {
 
   } catch (err) {
     console.error(`❌ Download xətası: ${err.message}`);
+    // Tmp faylları təmizlə
     try {
       fs.readdirSync(tmpDir).forEach(f => {
         if (f.includes(fileId)) {
