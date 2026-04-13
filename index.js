@@ -438,7 +438,7 @@ app.post('/api/audio/start', async (req, res) => {
       console.log('🎵 YouTube audio → m4a (birbaşa, çevirməsiz)');
       await execPromise(
         `yt-dlp -f "140/141/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
-        + `${cookie} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        + `${cookie} --js-runtimes node --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
         { timeout: 300000 }
       );
 
