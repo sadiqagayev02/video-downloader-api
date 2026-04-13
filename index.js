@@ -20,20 +20,62 @@ fs.mkdirSync(tmpDir, { recursive: true });
 fs.mkdirSync(audioDir, { recursive: true });
 fs.mkdirSync('/tmp/yt-cookies', { recursive: true });
 
-// ─── Cookie setup ─────────────────────────────────────────────────────────────
+// ─── Statik cookie setup (environment variable — fallback) ────────────────────
 if (process.env.YOUTUBE_COOKIE_BASE64) {
   try {
     const content = Buffer.from(process.env.YOUTUBE_COOKIE_BASE64, 'base64').toString('utf8');
     fs.writeFileSync(COOKIE_PATH, content);
-    console.log('✅ Cookie yaradıldı');
+    console.log('✅ Statik cookie yaradıldı (env)');
   } catch (e) {
-    console.log('⚠️ Cookie xətası:', e.message);
+    console.log('⚠️ Statik cookie xətası:', e.message);
   }
 }
 
-function getCookieArg() {
+// Statik cookie arg (environment variable-dan)
+function getStaticCookieArg() {
   try { fs.accessSync(COOKIE_PATH); return `--cookies "${COOKIE_PATH}"`; }
   catch { return ''; }
+}
+
+// ─── Flutter-dən gələn cookie string-i müvəqqəti Netscape faylına çevir ───────
+// Flutter "name=value; name2=value2" formatında göndərir
+// yt-dlp Netscape formatı istəyir
+function createTempCookieFile(cookieString, fileId) {
+  if (!cookieString || typeof cookieString !== 'string' || !cookieString.trim()) {
+    return null;
+  }
+  try {
+    const cookieFile = path.join('/tmp/yt-cookies', `flutter_${fileId}.txt`);
+    const lines = [
+      '# Netscape HTTP Cookie File',
+      '# Generated from Flutter app cookies',
+      '',
+    ];
+
+    cookieString.split(';').forEach(pair => {
+      const eqIdx = pair.indexOf('=');
+      if (eqIdx === -1) return;
+      const name  = pair.substring(0, eqIdx).trim();
+      const value = pair.substring(eqIdx + 1).trim();
+      if (!name) return;
+      // .youtube.com  TRUE  /  FALSE  <expiry>  <name>  <value>
+      lines.push(
+        `.youtube.com\tTRUE\t/\tFALSE\t${Math.floor(Date.now() / 1000) + 86400 * 14}\t${name}\t${value}`
+      );
+    });
+
+    fs.writeFileSync(cookieFile, lines.join('\n'));
+    console.log(`🍪 Flutter cookie faylı yaradıldı: ${lines.length - 3} cookie`);
+    return cookieFile;
+  } catch (e) {
+    console.log('⚠️ Flutter cookie fayl xətası:', e.message);
+    return null;
+  }
+}
+
+function deleteTempFile(filePath) {
+  if (!filePath) return;
+  try { fs.unlinkSync(filePath); } catch (_) {}
 }
 
 // ─── Innertube client ─────────────────────────────────────────────────────────
@@ -280,7 +322,7 @@ app.post('/api/download/start', async (req, res) => {
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
 
   const fileId      = crypto.randomBytes(16).toString('hex');
-  const cookie      = getCookieArg();
+  const cookie      = getStaticCookieArg();
   const isYoutube   = url.includes('youtube.com') || url.includes('youtu.be');
   const isTikTok    = url.includes('tiktok.com');
   const isInstagram = url.includes('instagram.com');
@@ -401,44 +443,47 @@ app.get('/api/download/file/:fileId', (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUDIO DOWNLOAD  —  /api/audio/*
 //
-// DƏYİŞİKLİK: --extract-audio --audio-format mp3 SİLİNDİ
-// Səbəb: ffmpeg çevirməsi 2-5 dəqiqə çəkir → client 60s timeout verir → abort
-// Həll: birbaşa m4a (AAC) yüklə → ffmpeg lazım deyil → 30-60s çəkir → işləyir
-// m4a bütün Android/iOS player-lərdə düzgün oxunur
+// DƏYİŞİKLİK:
+// Flutter-dən cookieString gəlir → müvəqqəti Netscape faylı yaradılır
+// → yt-dlp həmin cookie ilə işləyir → bot xətası yox
+// cookieString yoxdursa → statik environment cookie fallback
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/api/audio/start', async (req, res) => {
-  const { url } = req.body;
+  const { url, cookieString } = req.body; // ← cookieString Flutter-dən gəlir
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
   const fileId    = crypto.randomBytes(16).toString('hex');
-  const cookie    = getCookieArg();
   const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
 
   console.log(`🎵 Audio download: ${url}`);
 
-  // Həmişə m4a — ffmpeg çevirməsi yox, birbaşa yüklə
-  // tag 140 = 128kbps AAC m4a (ən geniş dəstəklənən format)
-  // tag 141 = 256kbps AAC m4a (yüksək keyfiyyət)
   const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
   let title = 'audio';
+
+  // Flutter-dən gələn cookie-ni müvəqqəti fayla yaz
+  // Yoxdursa statik environment cookie istifadə et
+  const tempCookieFile = createTempCookieFile(cookieString, fileId);
+  const cookieArg = tempCookieFile
+    ? `--cookies "${tempCookieFile}"`
+    : getStaticCookieArg();
+
+  console.log(`🍪 Cookie: ${tempCookieFile ? 'Flutter (dinamik)' : (cookieArg ? 'env (statik)' : 'yoxdur')}`);
 
   try {
     if (isYoutube) {
       try {
         const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist ${cookie} "${url}"`,
+          `yt-dlp --get-title --no-playlist ${cookieArg} "${url}"`,
           { timeout: 15000 }
         );
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      // 140 = 128kbps AAC m4a, 141 = 256kbps AAC m4a
-      // Heç biri yoxdursa → istənilən m4a → istənilən AAC → istənilən audio
-      console.log('🎵 YouTube audio → m4a (birbaşa, çevirməsiz)');
+      console.log('🎵 YouTube audio → m4a');
       await execPromise(
-        `yt-dlp -f "140/141/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
-        + `${cookie} --js-runtimes node --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
+        + `${cookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
         { timeout: 300000 }
       );
 
@@ -451,7 +496,7 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      console.log('🎵 Audio → m4a (birbaşa, çevirməsiz)');
+      console.log('🎵 Audio → m4a');
       await execPromise(
         `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
         + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
@@ -459,15 +504,14 @@ app.post('/api/audio/start', async (req, res) => {
       );
     }
 
-    // Həqiqi fayl yolunu tap (yt-dlp bəzən fərqli extension verir)
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
     if (!actualPath) throw new Error('Audio fayl tapılmadı');
 
     const stats = fs.statSync(actualPath);
     if (stats.size === 0) throw new Error('Audio fayl boşdur');
 
-    const actualExt = path.extname(actualPath).slice(1) || 'm4a';
-    const finalPath = path.join(audioDir, `out_${fileId}_final.${actualExt}`);
+    const actualExt  = path.extname(actualPath).slice(1) || 'm4a';
+    const finalPath  = path.join(audioDir, `out_${fileId}_final.${actualExt}`);
     fs.renameSync(actualPath, finalPath);
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
@@ -479,6 +523,8 @@ app.post('/api/audio/start', async (req, res) => {
     console.error(`❌ Audio download xətası: ${err.message}`);
     cleanupDir(audioDir, fileId);
     res.status(500).json({ success: false, error: err.message });
+  } finally {
+    deleteTempFile(tempCookieFile); // Müvəqqəti cookie faylını sil
   }
 });
 
