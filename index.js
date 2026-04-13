@@ -120,22 +120,6 @@ function extractYouTubeQualities(info) {
   return qualities;
 }
 
-let _hasFfmpeg = null;
-async function hasFfmpeg() {
-  if (_hasFfmpeg !== null) return _hasFfmpeg;
-  try {
-    await execPromise('ffmpeg -version', { timeout: 5000 });
-    _hasFfmpeg = true;
-    console.log('✅ ffmpeg mövcuddur');
-  } catch {
-    _hasFfmpeg = false;
-    console.log('⚠️ ffmpeg yoxdur — m4a formatı istifadə ediləcək');
-  }
-  return _hasFfmpeg;
-}
-
-hasFfmpeg();
-
 function findFile(dir, fileId) {
   try {
     const files = fs.readdirSync(dir).filter(f => f.startsWith(`out_${fileId}`));
@@ -288,7 +272,7 @@ app.post('/api/info', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// VIDEO DOWNLOAD  —  /api/download/*
+// VIDEO DOWNLOAD
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/api/download/start', async (req, res) => {
@@ -306,10 +290,7 @@ app.post('/api/download/start', async (req, res) => {
   if (isTikTok) {
     const resolvedForCheck = await resolveTikTokUrl(url);
     if (isTikTokPhotoUrl(resolvedForCheck)) {
-      return res.status(422).json({
-        success: false,
-        error: 'Bu TikTok foto paylaşımıdır. Yalnız videolar yüklənə bilər.',
-      });
+      return res.status(422).json({ success: false, error: 'Bu TikTok foto paylaşımıdır.' });
     }
   }
 
@@ -331,7 +312,6 @@ app.post('/api/download/start', async (req, res) => {
     } catch (e) { console.log('⚠️ TikTok cookie yazma xətası:', e.message); }
   }
 
-  const ffmpegAvailable = await hasFfmpeg();
   const outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
   let title = 'video';
 
@@ -343,14 +323,9 @@ app.post('/api/download/start', async (req, res) => {
       } catch (_) {}
 
       const h = parseInt(quality);
-      let fmtArg;
-      if (!isNaN(h)) {
-        fmtArg = ffmpegAvailable
-          ? `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${h}]+bestaudio/best[height<=${h}][ext=mp4]/best[height<=${h}]/best`
-          : `best[height<=${h}][ext=mp4]/best[height<=${h}]/best[ext=mp4]/best`;
-      } else {
-        fmtArg = ffmpegAvailable ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best' : 'best[ext=mp4]/best';
-      }
+      const fmtArg = !isNaN(h)
+        ? `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${h}]+bestaudio/best[height<=${h}][ext=mp4]/best[height<=${h}]/best`
+        : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
 
       console.log(`📥 YouTube video | format: ${fmtArg}`);
       await execPromise(
@@ -399,8 +374,7 @@ app.post('/api/download/start', async (req, res) => {
     fs.renameSync(actualPath, finalPath);
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
-    console.log(`✅ Video tamamlandı: ${(stats.size / 1024 / 1024).toFixed(1)} MB → ${filename}`);
-
+    console.log(`✅ Video tamamlandı: ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
     res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size });
 
   } catch (err) {
@@ -421,13 +395,16 @@ app.get('/api/download/file/:fileId', (req, res) => {
       return res.download(filePath, () => { try { fs.unlinkSync(filePath); } catch (_) {} });
     }
   }
-  console.error(`❌ Video fayl tapılmadı: out_${fileId}.*`);
   res.status(404).json({ error: 'Fayl tapılmadı' });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUDIO DOWNLOAD  —  /api/audio/*
-// MP4 ilə eyni məntiq, amma yalnız audio, ayrı qovluq, ayrı endpoint
+//
+// DƏYİŞİKLİK: --extract-audio --audio-format mp3 SİLİNDİ
+// Səbəb: ffmpeg çevirməsi 2-5 dəqiqə çəkir → client 60s timeout verir → abort
+// Həll: birbaşa m4a (AAC) yüklə → ffmpeg lazım deyil → 30-60s çəkir → işləyir
+// m4a bütün Android/iOS player-lərdə düzgün oxunur
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/api/audio/start', async (req, res) => {
@@ -440,67 +417,57 @@ app.post('/api/audio/start', async (req, res) => {
 
   console.log(`🎵 Audio download: ${url}`);
 
-  const ffmpegAvailable = await hasFfmpeg();
-
-  // ffmpeg varsa → mp3, yoxsa → m4a (AAC) — hər iki halda audio
-  const outputExt  = ffmpegAvailable ? 'mp3' : 'm4a';
-  const outputPath = path.join(audioDir, `out_${fileId}.${outputExt}`);
+  // Həmişə m4a — ffmpeg çevirməsi yox, birbaşa yüklə
+  // tag 140 = 128kbps AAC m4a (ən geniş dəstəklənən format)
+  // tag 141 = 256kbps AAC m4a (yüksək keyfiyyət)
+  const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
   let title = 'audio';
 
   try {
     if (isYoutube) {
       try {
-        const { stdout } = await execPromise(`yt-dlp --get-title --no-playlist ${cookie} "${url}"`, { timeout: 15000 });
+        const { stdout } = await execPromise(
+          `yt-dlp --get-title --no-playlist ${cookie} "${url}"`,
+          { timeout: 15000 }
+        );
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      if (ffmpegAvailable) {
-        // ffmpeg var → ən yaxşı audio seç, mp3-ə çevir
-        console.log('🎵 YouTube audio → mp3 (ffmpeg)');
-        await execPromise(
-          `yt-dlp -f "bestaudio/best" ${cookie} --extract-audio --audio-format mp3 --audio-quality 0 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-          { timeout: 300000 }
-        );
-      } else {
-        // ffmpeg yox → birbaşa AAC/m4a yüklə (tag 140=128kbps, 141=256kbps)
-        console.log('🎵 YouTube audio → m4a (ffmpeg yoxdur)');
-        await execPromise(
-          `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/140/141/bestaudio" ${cookie} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-          { timeout: 300000 }
-        );
-      }
+      // 140 = 128kbps AAC m4a, 141 = 256kbps AAC m4a
+      // Heç biri yoxdursa → istənilən m4a → istənilən AAC → istənilən audio
+      console.log('🎵 YouTube audio → m4a (birbaşa, çevirməsiz)');
+      await execPromise(
+        `yt-dlp -f "140/141/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
+        + `${cookie} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
 
     } else {
-      // Digər platformalar — yt-dlp ilə best audio
       try {
-        const { stdout } = await execPromise(`yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 });
+        const { stdout } = await execPromise(
+          `yt-dlp --get-title --no-playlist "${url}"`,
+          { timeout: 15000 }
+        );
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      if (ffmpegAvailable) {
-        console.log('🎵 Audio → mp3 (ffmpeg)');
-        await execPromise(
-          `yt-dlp -f "bestaudio/best" --extract-audio --audio-format mp3 --audio-quality 0 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-          { timeout: 300000 }
-        );
-      } else {
-        console.log('🎵 Audio → m4a (ffmpeg yoxdur)');
-        await execPromise(
-          `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-          { timeout: 300000 }
-        );
-      }
+      console.log('🎵 Audio → m4a (birbaşa, çevirməsiz)');
+      await execPromise(
+        `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
+        + `--no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
     }
 
-    // Həqiqi fayl yolunu tap — yt-dlp bəzən fərqli extension saxlayır
+    // Həqiqi fayl yolunu tap (yt-dlp bəzən fərqli extension verir)
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
     if (!actualPath) throw new Error('Audio fayl tapılmadı');
 
     const stats = fs.statSync(actualPath);
     if (stats.size === 0) throw new Error('Audio fayl boşdur');
 
-    const actualExt  = path.extname(actualPath).slice(1) || outputExt;
-    const finalPath  = path.join(audioDir, `out_${fileId}_final.${actualExt}`);
+    const actualExt = path.extname(actualPath).slice(1) || 'm4a';
+    const finalPath = path.join(audioDir, `out_${fileId}_final.${actualExt}`);
     fs.renameSync(actualPath, finalPath);
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
@@ -517,14 +484,13 @@ app.post('/api/audio/start', async (req, res) => {
 
 app.get('/api/audio/file/:fileId', (req, res) => {
   const { fileId } = req.params;
-  for (const ext of ['mp3', 'm4a', 'aac', 'opus', 'webm']) {
+  for (const ext of ['m4a', 'mp3', 'aac', 'opus', 'webm']) {
     const filePath = path.join(audioDir, `out_${fileId}.${ext}`);
     if (fs.existsSync(filePath)) {
       console.log(`📤 Audio göndərilir: ${path.basename(filePath)}`);
       return res.download(filePath, () => { try { fs.unlinkSync(filePath); } catch (_) {} });
     }
   }
-  console.error(`❌ Audio fayl tapılmadı: out_${fileId}.*`);
   res.status(404).json({ error: 'Audio fayl tapılmadı' });
 });
 
