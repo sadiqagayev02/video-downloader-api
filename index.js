@@ -36,7 +36,6 @@ function getStaticCookieArg() {
   catch { return ''; }
 }
 
-// Flutter-dən "name=value; name2=value2" → Netscape formatı
 function createTempCookieFile(cookieString, fileId) {
   if (!cookieString || typeof cookieString !== 'string' || !cookieString.trim()) return null;
   try {
@@ -62,6 +61,43 @@ function createTempCookieFile(cookieString, fileId) {
 function deleteTempFile(filePath) {
   if (!filePath) return;
   try { fs.unlinkSync(filePath); } catch (_) {}
+}
+
+// ─── YouTube audio strategiyaları ────────────────────────────────────────────
+// Signature solving xətasını keçmək üçün müxtəlif player_client-lər sınanır
+const YOUTUBE_AUDIO_STRATEGIES = [
+  { name: 'tv_embedded',  args: '--extractor-args "youtube:player_client=tv_embedded"' },
+  { name: 'ios',          args: '--extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"' },
+  { name: 'android_vr',   args: '--extractor-args "youtube:player_client=android_vr" --user-agent "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12)"' },
+  { name: 'web_creator',  args: '--extractor-args "youtube:player_client=web_creator"' },
+  { name: 'mweb',         args: '--extractor-args "youtube:player_client=mweb"' },
+  { name: 'default',      args: '' },
+];
+
+// YouTube audio yükləmə — strategiyalarla
+async function downloadYoutubeAudio(url, outputPath, cookieArg) {
+  let lastErr = null;
+
+  for (const strategy of YOUTUBE_AUDIO_STRATEGIES) {
+    try {
+      console.log(`🎵 YouTube audio strategiya: ${strategy.name}`);
+      const cmd = `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
+        + `${strategy.args} ${cookieArg} --no-playlist --retries 2 -o "${outputPath}" "${url}"`;
+      await execPromise(cmd, { timeout: 120000, maxBuffer: 5 * 1024 * 1024 });
+
+      // Uğurlu — faylı yoxla
+      if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+        console.log(`✅ YouTube audio strategiya işlədi: ${strategy.name}`);
+        return;
+      }
+    } catch (err) {
+      console.log(`⚠️ ${strategy.name} uğursuz: ${err.message.substring(0, 120)}`);
+      lastErr = err;
+      // Növbəti strategiyaya keç
+    }
+  }
+
+  throw new Error(`YouTube audio: bütün strategiyalar uğursuz. Son xəta: ${lastErr?.message}`);
 }
 
 // ─── Innertube ────────────────────────────────────────────────────────────────
@@ -178,7 +214,6 @@ app.post('/api/info', async (req, res) => {
   const isInstagram = url.includes('instagram.com');
 
   try {
-    // ── YouTube ──────────────────────────────────────────────────────────────
     if (isYoutube) {
       const videoId = extractVideoId(url);
       if (!videoId) return res.status(400).json({ error: 'Video ID tapılmadı' });
@@ -208,7 +243,6 @@ app.post('/api/info', async (req, res) => {
       });
     }
 
-    // ── TikTok ────────────────────────────────────────────────────────────────
     if (isTikTok) {
       const resolvedUrl = await resolveTikTokUrl(url);
       if (isTikTokPhotoUrl(resolvedUrl)) {
@@ -241,7 +275,6 @@ app.post('/api/info', async (req, res) => {
         success: true,
         data: {
           title, thumbnail, duration, platform: 'tiktok', uploader,
-          // MP3 seçimi əlavə edildi
           qualities: [
             { label: 'HD Video',    value: 'video', ext: 'mp4' },
             { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
@@ -250,7 +283,6 @@ app.post('/api/info', async (req, res) => {
       });
     }
 
-    // ── Instagram ─────────────────────────────────────────────────────────────
     if (isInstagram) {
       let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
       try {
@@ -270,7 +302,6 @@ app.post('/api/info', async (req, res) => {
         success: true,
         data: {
           title, thumbnail, duration, platform: 'instagram', uploader,
-          // MP3 seçimi əlavə edildi
           qualities: [
             { label: 'HD Video',    value: 'video', ext: 'mp4' },
             { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
@@ -279,7 +310,6 @@ app.post('/api/info', async (req, res) => {
       });
     }
 
-    // ── Digər ─────────────────────────────────────────────────────────────────
     let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
     try {
       const { stdout } = await execPromise(
@@ -449,7 +479,6 @@ app.post('/api/audio/start', async (req, res) => {
 
   console.log(`🎵 Audio download: ${url} | platform: ${isYoutube ? 'youtube' : isTikTok ? 'tiktok' : isInstagram ? 'instagram' : 'other'}`);
 
-  // TikTok foto yoxlaması
   if (isTikTok) {
     const resolvedForCheck = await resolveTikTokUrl(url);
     if (isTikTokPhotoUrl(resolvedForCheck)) {
@@ -460,7 +489,6 @@ app.post('/api/audio/start', async (req, res) => {
   const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
   let title = 'audio';
 
-  // Cookie idarəsi
   const tempCookieFile = isYoutube ? createTempCookieFile(cookieString, fileId) : null;
   const ytCookieArg    = tempCookieFile ? `--cookies "${tempCookieFile}"` : getStaticCookieArg();
 
@@ -468,7 +496,7 @@ app.post('/api/audio/start', async (req, res) => {
 
   try {
     if (isYoutube) {
-      // ── YouTube audio ───────────────────────────────────────────────────────
+      // Başlığı al
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`, { timeout: 15000 }
@@ -476,15 +504,11 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
+      // ── Strategiyalarla yüklə ───────────────────────────────────────────────
       console.log('🎵 YouTube audio → m4a');
-      await execPromise(
-        `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
-        + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+      await downloadYoutubeAudio(url, outputPath, ytCookieArg);
 
     } else if (isTikTok) {
-      // ── TikTok audio ───────────────────────────────────────────────────────
       const tkArgs      = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
       const resolvedUrl = await resolveTikTokUrl(url);
 
@@ -503,7 +527,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
 
     } else if (isInstagram) {
-      // ── Instagram audio ────────────────────────────────────────────────────
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 }
@@ -519,7 +542,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
 
     } else {
-      // ── Digər ──────────────────────────────────────────────────────────────
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 }
@@ -535,7 +557,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
     }
 
-    // Faylı tap
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
     if (!actualPath) throw new Error('Audio fayl tapılmadı');
 
