@@ -86,14 +86,16 @@ class YtDlpService {
     return null;
   }
 
+  // ── DÜZƏLDI: playlist URL-lərindən də video ID tapır ─────────────────────
   extractYouTubeId(url) {
     const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,
-      /youtube\.com\/shorts\/([^&\n?#]+)/,
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,  // watch?v= və youtu.be/
+      /youtube\.com\/shorts\/([^&\n?#]+)/,                    // shorts/
+      /[?&]v=([^&\n?#]+)/,                                    // YENİ: ?v= və ya &v= (playlist URL-ləri)
     ];
     for (const p of patterns) {
       const m = url.match(p);
-      if (m) return m[1];
+      if (m && m[1]) return m[1];
     }
     return null;
   }
@@ -233,8 +235,6 @@ class YtDlpService {
   }
 
   // ─── TikTok Info ─────────────────────────────────────────────────────────
-  // TikTok üçün yalnız metadata lazımdır (title, thumbnail, duration).
-  // Real yükləmə download.js-də yt-dlp ilə birbaşa aparılır — URL ayrıca alınmır.
 
   async getTikTokInfo(url) {
     const strategies = [
@@ -258,12 +258,11 @@ class YtDlpService {
   }
 
   processTikTokData(data) {
-    // TikTok üçün yalnız bir seçim: "video" — yükləmə zamanı yt-dlp özü ən yaxşısını seçir
     const qualities = [
       {
         label: 'HD Video',
         value: 'video',
-        formatId: 'best',   // yt-dlp birbaşa yükləyəcək
+        formatId: 'best',
         url: null,
         filesize: null,
         ext: 'mp4',
@@ -324,22 +323,18 @@ class YtDlpService {
 
   // ─── Download metodları ───────────────────────────────────────────────────
 
-  // Birbaşa CDN URL-dən yüklə (Invidious audio/video)
   async downloadByUrl(directUrl, outputPath) {
     const cmd = `curl -L --max-time 300 --retry 2 --retry-delay 3 -o "${outputPath}" "${directUrl}"`;
     console.log(`📥 curl download: ${directUrl.substring(0, 80)}...`);
     await execPromise(cmd, { timeout: 310000 });
   }
 
-  // yt-dlp format ID ilə yüklə (YouTube DASH, combined)
   async downloadFormat(originalUrl, formatId, outputPath) {
     const cmd = `yt-dlp -f "${formatId}" --no-playlist --retries 3 -o "${outputPath}" "${originalUrl}"`;
     console.log(`📥 yt-dlp format: ${formatId}`);
     await execPromise(cmd, { timeout: 300000, maxBuffer: 5 * 1024 * 1024 });
   }
 
-  // yt-dlp ilə birbaşa yüklə — TikTok/Instagram/generic üçün
-  // URL ayrıca alınmır, yt-dlp hər şeyi özü idarə edir → 403 olmur
   async downloadDirect(originalUrl, outputPath, platform) {
     let extraArgs = '';
 
