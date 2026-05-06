@@ -476,9 +476,9 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      await execPromise(
+   await execPromise(
   `yt-dlp -f "bestaudio" --extract-audio --audio-format m4a `
-  + `${ytCookieArg} --no-cookies --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+  + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
   { timeout: 300000 }
 );
 
