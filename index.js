@@ -66,15 +66,33 @@ function deleteTempFile(filePath) {
 // ─── Youtubei.js client ───────────────────────────────────────────────────────
 // yt-dlp JS runtime tələb edir → Render-də yoxdur → "Signature solving failed"
 // youtubei.js saf Node.js-dir, heç bir xarici runtime lazım deyil
-let ytClient = null;
-async function getYouTubeClient() {
-  if (ytClient) return ytClient;
+//
+// cookieString varsa → cookie ilə yeni client (login-required videolar üçün)
+// cookieString yoxdursa → anonim client (cache-dən)
+let ytClientAnon = null;
+
+async function getYouTubeClient(cookieString) {
   const { Innertube } = await import('youtubei.js');
-  ytClient = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
-  console.log('✅ Innertube client hazırdır');
-  return ytClient;
+
+  // Cookie varsa — hər dəfə təzə client yarat (fərqli istifadəçilər üçün)
+  if (cookieString && cookieString.trim()) {
+    console.log('🍪 Innertube: cookie ilə client yaradılır');
+    return await Innertube.create({
+      lang: 'en',
+      location: 'US',
+      retrieve_player: true,
+      cookie: cookieString.trim(),
+    });
+  }
+
+  // Cookie yoxdursa — anonim client cache-dən
+  if (ytClientAnon) return ytClientAnon;
+  ytClientAnon = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
+  console.log('✅ Innertube anonim client hazırdır');
+  return ytClientAnon;
 }
-getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
+
+getYouTubeClient(null).catch(e => console.log('⚠️ Innertube init xətası:', e.message));
 
 function extractVideoId(url) {
   try {
@@ -494,9 +512,9 @@ app.post('/api/audio/start', async (req, res) => {
       const videoId = extractVideoId(url);
       if (!videoId) throw new Error('YouTube video ID tapılmadı');
 
-      console.log(`🎵 YouTube audio → youtubei.js | videoId: ${videoId}`);
+      console.log(`🎵 YouTube audio → youtubei.js | videoId: ${videoId} | cookie: ${cookieString ? 'var' : 'yox'}`);
 
-      const yt   = await getYouTubeClient();
+      const yt   = await getYouTubeClient(cookieString);
       const info = await yt.getBasicInfo(videoId);
       title = info.basic_info?.title || 'audio';
       console.log(`📄 Başlıq: ${title}`);
