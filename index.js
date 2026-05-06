@@ -179,35 +179,32 @@ app.post('/api/info', async (req, res) => {
 
   try {
     // ── YouTube ──────────────────────────────────────────────────────────────
-    if (isYoutube) {
-      const videoId = extractVideoId(url);
-      if (!videoId) return res.status(400).json({ error: 'Video ID tapılmadı' });
-
-      const client = await getYouTubeClient();
-      const info   = await client.getInfo(videoId);
-      const qualities = extractYouTubeQualities(info);
-
-      const finalQualities = qualities.length > 0 ? qualities : [
-        { label: '1080p Full HD', value: '1080', ext: 'mp4' },
-        { label: '720p HD',       value: '720',  ext: 'mp4' },
-        { label: '480p',          value: '480',  ext: 'mp4' },
-        { label: '360p',          value: '360',  ext: 'mp4' },
-        { label: 'MP3 (Audio)',   value: 'audio', ext: 'm4a' },
-      ];
-
-      return res.json({
-        success: true,
-        data: {
-          title:     info.basic_info?.title || 'YouTube Video',
-          thumbnail: info.basic_info?.thumbnail?.[0]?.url || '',
-          duration:  formatDuration(info.basic_info?.duration || 0),
-          platform:  'youtube',
-          uploader:  info.basic_info?.author || '',
-          qualities: finalQualities,
-        },
-      });
+   if (isYoutube) {
+  console.log('🎵 YouTube audio → Innertube birbaşa');
+  try {
+    const yt = await getYouTubeClient();
+    const videoId = extractVideoId(url);
+    if (!videoId) throw new Error('Video ID tapılmadı');
+    
+    const info = await yt.getBasicInfo(videoId);
+    title = info.basic_info?.title || 'audio';
+    
+    const stream = await yt.download(videoId, {
+      type: 'audio',
+      quality: 'best',
+      format: 'm4a'
+    });
+    
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
     }
-
+    const buffer = Buffer.concat(chunks);
+    fs.writeFileSync(outputPath, buffer);
+    
+  } catch (e) {
+    throw new Error(`Innertube audio: ${e.message}`);
+  }
     // ── TikTok ────────────────────────────────────────────────────────────────
     if (isTikTok) {
       const resolvedUrl = await resolveTikTokUrl(url);
