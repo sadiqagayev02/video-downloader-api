@@ -363,10 +363,10 @@ app.post('/api/download/start', async (req, res) => {
         : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
 
       console.log(`📥 YouTube video | format: ${fmtArg}`);
-      await execPromise(
-        `yt-dlp -f "${fmtArg}" ${cookie} --merge-output-format mp4 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+     await execPromise(
+  `yt-dlp -f "ba[ext=m4a]" ${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+  { timeout: 300000 }
+);
 
     } else if (isTikTok) {
       const tkArgs      = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
