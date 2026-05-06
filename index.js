@@ -64,27 +64,7 @@ function deleteTempFile(filePath) {
   try { fs.unlinkSync(filePath); } catch (_) {}
 }
 
-// ─── Innertube ────────────────────────────────────────────────────────────────
-let ytClient = null;
-async function getYouTubeClient() {
-  if (ytClient) return ytClient;
-  const { Innertube } = await import('youtubei.js');
-  ytClient = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
-  console.log('✅ Innertube client hazırdır');
-  return ytClient;
-}
-getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
-
 // ─── Yardımçılar ──────────────────────────────────────────────────────────────
-function extractVideoId(url) {
-  try {
-    const uri = new URL(url);
-    if (uri.hostname === 'youtu.be') return uri.pathname.slice(1).split('?')[0];
-    if (uri.pathname.includes('/shorts/')) return uri.pathname.split('/shorts/')[1].split('?')[0];
-    return uri.searchParams.get('v');
-  } catch { return null; }
-}
-
 function formatDuration(secs) {
   if (!secs) return '00:00';
   const h = Math.floor(secs / 3600);
@@ -107,36 +87,6 @@ async function resolveTikTokUrl(url) {
     console.log(`🔗 TikTok resolved: ${resolved || url}`);
     return resolved || url;
   } catch { return url; }
-}
-
-function extractYouTubeQualities(info) {
-  const adaptive   = info.streaming_data?.adaptive_formats || [];
-  const basic      = info.streaming_data?.formats || [];
-  const allFormats = [...basic, ...adaptive];
-  const seen       = new Set();
-  const qualities  = [];
-
-  const heights = new Set();
-  for (const f of allFormats) {
-    if (f.height && f.height > 0) heights.add(f.height);
-  }
-  for (const h of [...heights].sort((a, b) => b - a)) {
-    const hasVideo = allFormats.some(f => f.height === h && f.mime_type?.startsWith('video/'));
-    if (!hasVideo || seen.has(h)) continue;
-    seen.add(h);
-    let label;
-    if      (h >= 2160) label = '4K Ultra HD';
-    else if (h >= 1440) label = '1440p QHD';
-    else if (h >= 1080) label = '1080p Full HD';
-    else if (h >= 720)  label = '720p HD';
-    else                label = `${h}p`;
-    qualities.push({ label, value: String(h), ext: 'mp4' });
-  }
-  const hasAudio = adaptive.some(f => f.mime_type?.startsWith('audio/'));
-  if (hasAudio) {
-    qualities.push({ label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' });
-  }
-  return qualities;
 }
 
 function findFile(dir, fileId) {
@@ -168,8 +118,10 @@ app.get('/api/health', (req, res) => {
 });
 
 // ─── Info ─────────────────────────────────────────────────────────────────────
+// FIX 1: cookieString qəbul edilir
+// FIX 2: YouTube hissəsi yt-dlp ilə metadata + keyfiyyət siyahısı qaytarır
 app.post('/api/info', async (req, res) => {
-  const { url } = req.body;
+  const { url, cookieString } = req.body;
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
   console.log(`📡 Info: ${url}`);
@@ -178,35 +130,137 @@ app.post('/api/info', async (req, res) => {
   const isInstagram = url.includes('instagram.com');
 
   try {
+
+    // ── YouTube ───────────────────────────────────────────────────────────────
     if (isYoutube) {
-      // YouTube audio → Innertube birbaşa
-      console.log('🎵 YouTube audio → Innertube');
-      try {
-        const yt = await getYouTubeClient();
-        const videoId = extractVideoId(url);
-        if (!videoId) throw new Error('Video ID tapılmadı');
-        
-        const info = await yt.getBasicInfo(videoId);
-        title = info.basic_info?.title || 'audio';
-        
-        const stream = await yt.download(videoId, {
-          type: 'audio',
-          quality: 'best',
-          format: 'm4a'
-        });
-        
-        const chunks = [];
-        for await (const chunk of stream) {
-          chunks.push(chunk);
+      const fileId = crypto.randomBytes(8).toString('hex');
+      const tempCookieFile = createTempCookieFile(cookieString, `info_${fileId}`);
+      const ytCookieArg    = tempCookieFile ? `--cookies "${tempCookieFile}"` : getStaticCookieArg();
+
+      console.log(`🎬 YouTube info | cookie: ${tempCookieFile ? 'flutter' : (ytCookieArg ? 'statik' : 'yoxdur')}`);
+
+      let title = 'YouTube Video', thumbnail = '', duration = '00:00', uploader = '';
+
+      const strategies = [
+        '--extractor-args "youtube:player_client=tv_embedded"',
+        '--extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"',
+        '--extractor-args "youtube:player_client=android_vr"',
+        '--extractor-args "youtube:player_client=web_creator"',
+        '',
+      ];
+
+      let formats = [];
+      let rawData = null;
+
+      for (const strategy of strategies) {
+        try {
+          console.log(`📡 YouTube strategiya: ${strategy || 'default'}`);
+          const { stdout } = await execPromise(
+            `yt-dlp ${strategy} ${ytCookieArg} --dump-json --no-playlist --socket-timeout 30 "${url}"`,
+            { timeout: 45000, maxBuffer: 20 * 1024 * 1024 }
+          );
+          rawData = JSON.parse(stdout);
+          if (rawData?.formats) { formats = rawData.formats; break; }
+        } catch (e) {
+          console.log(`⚠️ Strategiya uğursuz: ${e.message.substring(0, 100)}`);
         }
-        const buffer = Buffer.concat(chunks);
-        fs.writeFileSync(outputPath, buffer);
-        
-      } catch (e) {
-        throw new Error(`Innertube audio: ${e.message}`);
       }
 
-    } else if (isTikTok) {
+      if (rawData) {
+        title     = rawData.title     || 'YouTube Video';
+        thumbnail = rawData.thumbnail || '';
+        duration  = formatDuration(rawData.duration || 0);
+        uploader  = rawData.uploader  || rawData.channel || '';
+      }
+
+      // Keyfiyyət siyahısını qur
+      const qualities = [];
+      const audioBest = formats
+        .filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'))
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+      // 1080p — DASH (needsMerge: true)
+      const v1080 = formats
+        .filter(f => f.height === 1080 && f.vcodec && f.vcodec !== 'none' && (!f.acodec || f.acodec === 'none'))
+        .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+
+      if (v1080 && audioBest) {
+        qualities.push({
+          label: '1080p Full HD',
+          value: '1080p',
+          videoFormatId: v1080.format_id,
+          audioFormatId: audioBest.format_id,
+          filesize: (v1080.filesize || 0) + (audioBest.filesize || 0),
+          ext: 'mp4',
+          needsMerge: true,
+        });
+      }
+
+      // 720p, 480p, 360p
+      for (const res of [720, 480, 360]) {
+        const combined = formats
+          .filter(f => f.height === res && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none')
+          .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+
+        if (combined) {
+          qualities.push({
+            label: res === 720 ? '720p HD' : `${res}p`,
+            value: `${res}p`,
+            formatId: combined.format_id,
+            filesize: combined.filesize || null,
+            ext: 'mp4',
+            needsMerge: false,
+          });
+        } else if (audioBest) {
+          const vOnly = formats
+            .filter(f => f.height === res && f.vcodec && f.vcodec !== 'none' && (!f.acodec || f.acodec === 'none'))
+            .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+          if (vOnly) {
+            qualities.push({
+              label: res === 720 ? '720p HD' : `${res}p`,
+              value: `${res}p`,
+              videoFormatId: vOnly.format_id,
+              audioFormatId: audioBest.format_id,
+              filesize: (vOnly.filesize || 0) + (audioBest.filesize || 0),
+              ext: 'mp4',
+              needsMerge: true,
+            });
+          }
+        }
+      }
+
+      // Audio
+      if (audioBest) {
+        qualities.push({
+          label: 'MP3 (Audio)',
+          value: 'audio',
+          formatId: audioBest.format_id,
+          filesize: audioBest.filesize || null,
+          ext: 'm4a',
+          needsMerge: false,
+        });
+      }
+
+      // Heç bir format tapılmadısa — default siyahı
+      if (qualities.length === 0) {
+        qualities.push(
+          { label: '720p HD',     value: '720p',  ext: 'mp4', needsMerge: false },
+          { label: '480p',        value: '480p',  ext: 'mp4', needsMerge: false },
+          { label: '360p',        value: '360p',  ext: 'mp4', needsMerge: false },
+          { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a', needsMerge: false },
+        );
+      }
+
+      deleteTempFile(tempCookieFile);
+
+      return res.json({
+        success: true,
+        data: { title, thumbnail, duration, platform: 'youtube', uploader, qualities },
+      });
+    }
+
+    // ── TikTok ────────────────────────────────────────────────────────────────
+    if (isTikTok) {
       const resolvedUrl = await resolveTikTokUrl(url);
       if (isTikTokPhotoUrl(resolvedUrl)) {
         return res.status(422).json({
@@ -238,7 +292,6 @@ app.post('/api/info', async (req, res) => {
         success: true,
         data: {
           title, thumbnail, duration, platform: 'tiktok', uploader,
-          // MP3 seçimi əlavə edildi
           qualities: [
             { label: 'HD Video',    value: 'video', ext: 'mp4' },
             { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
@@ -267,7 +320,6 @@ app.post('/api/info', async (req, res) => {
         success: true,
         data: {
           title, thumbnail, duration, platform: 'instagram', uploader,
-          // MP3 seçimi əlavə edildi
           qualities: [
             { label: 'HD Video',    value: 'video', ext: 'mp4' },
             { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
@@ -307,12 +359,12 @@ app.post('/api/info', async (req, res) => {
 // VIDEO DOWNLOAD — /api/download/*
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// FIX 3: cookieString qəbul edilir, ytCookieArg düzgün təyin edilir, fmtArg işlədilir
 app.post('/api/download/start', async (req, res) => {
-  const { url, quality, tiktokCookies } = req.body;
+  const { url, quality, cookieString, tiktokCookies } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
 
   const fileId      = crypto.randomBytes(16).toString('hex');
-  const cookie      = getStaticCookieArg();
   const isYoutube   = url.includes('youtube.com') || url.includes('youtu.be');
   const isTikTok    = url.includes('tiktok.com');
   const isInstagram = url.includes('instagram.com');
@@ -326,6 +378,7 @@ app.post('/api/download/start', async (req, res) => {
     }
   }
 
+  // TikTok cookie
   let tiktokCookiePath = null;
   let tiktokCookieArg  = '';
   if (isTikTok && tiktokCookies && Array.isArray(tiktokCookies) && tiktokCookies.length > 0) {
@@ -344,32 +397,48 @@ app.post('/api/download/start', async (req, res) => {
     } catch (e) { console.log('⚠️ TikTok cookie xətası:', e.message); }
   }
 
+  // FIX: ytCookieArg burada düzgün təyin edilir (əvvəl yox idi)
+  const tempYtCookieFile = isYoutube ? createTempCookieFile(cookieString, fileId) : null;
+  const ytCookieArg      = tempYtCookieFile ? `--cookies "${tempYtCookieFile}"` : getStaticCookieArg();
+
+  if (isYoutube) {
+    console.log(`🍪 YT Cookie: ${tempYtCookieFile ? 'Flutter (dinamik)' : (ytCookieArg ? 'env (statik)' : 'yoxdur')}`);
+  }
+
   const outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
   let title = 'video';
 
   try {
     if (isYoutube) {
       try {
-        const { stdout } = await execPromise(`yt-dlp --get-title --no-playlist ${cookie} "${url}"`, { timeout: 15000 });
+        const { stdout } = await execPromise(
+          `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`,
+          { timeout: 15000 }
+        );
         title = stdout.trim() || 'video';
       } catch (_) {}
 
-      const h = parseInt(quality);
+      // FIX: fmtArg həm hesablanır HƏM də işlədilir
+      const h = parseInt(quality); // "1080p"→1080, "720p"→720, "audio"→NaN
       const fmtArg = !isNaN(h)
-        ? `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=${h}]+bestaudio/best[height<=${h}][ext=mp4]/best[height<=${h}]/best`
+        ? `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`
         : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
 
       console.log(`📥 YouTube video | format: ${fmtArg}`);
-     await execPromise(
-  `yt-dlp -f "ba[ext=m4a]" ${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-  { timeout: 300000 }
-);
+
+      await execPromise(
+        `yt-dlp -f "${fmtArg}" ${ytCookieArg} --merge-output-format mp4 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
 
     } else if (isTikTok) {
       const tkArgs      = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
       const resolvedUrl = await resolveTikTokUrl(url);
       try {
-        const { stdout } = await execPromise(`yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${resolvedUrl}"`, { timeout: 15000 });
+        const { stdout } = await execPromise(
+          `yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${resolvedUrl}"`,
+          { timeout: 15000 }
+        );
         title = stdout.trim() || 'video';
       } catch (_) {}
 
@@ -381,7 +450,10 @@ app.post('/api/download/start', async (req, res) => {
 
     } else if (isInstagram) {
       try {
-        const { stdout } = await execPromise(`yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 });
+        const { stdout } = await execPromise(
+          `yt-dlp --get-title --no-playlist "${url}"`,
+          { timeout: 15000 }
+        );
         title = stdout.trim() || 'video';
       } catch (_) {}
 
@@ -392,7 +464,10 @@ app.post('/api/download/start', async (req, res) => {
       );
 
     } else {
-      await execPromise(`yt-dlp -f "best" ${cookie} --no-playlist -o "${outputPath}" "${url}"`, { timeout: 300000 });
+      await execPromise(
+        `yt-dlp -f "best" --no-playlist -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
     }
 
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(tmpDir, fileId);
@@ -407,13 +482,14 @@ app.post('/api/download/start', async (req, res) => {
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
     console.log(`✅ Video: ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
-    res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size });
+    res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size, title });
 
   } catch (err) {
     console.error(`❌ Video xətası: ${err.message}`);
     cleanupDir(tmpDir, fileId);
     res.status(500).json({ success: false, error: err.message });
   } finally {
+    deleteTempFile(tempYtCookieFile);
     if (tiktokCookiePath) { try { fs.unlinkSync(tiktokCookiePath); } catch (_) {} }
   }
 });
@@ -432,7 +508,6 @@ app.get('/api/download/file/:fileId', (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUDIO DOWNLOAD — /api/audio/*
-// YouTube + TikTok + Instagram
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.post('/api/audio/start', async (req, res) => {
@@ -444,9 +519,8 @@ app.post('/api/audio/start', async (req, res) => {
   const isTikTok    = url.includes('tiktok.com');
   const isInstagram = url.includes('instagram.com');
 
-  console.log(`🎵 Audio download: ${url} | platform: ${isYoutube ? 'youtube' : isTikTok ? 'tiktok' : isInstagram ? 'instagram' : 'other'}`);
+  console.log(`🎵 Audio: ${url}`);
 
-  // TikTok foto yoxlaması
   if (isTikTok) {
     const resolvedForCheck = await resolveTikTokUrl(url);
     if (isTikTokPhotoUrl(resolvedForCheck)) {
@@ -457,7 +531,6 @@ app.post('/api/audio/start', async (req, res) => {
   const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
   let title = 'audio';
 
-  // Cookie idarəsi
   const tempCookieFile = isYoutube ? createTempCookieFile(cookieString, fileId) : null;
   const ytCookieArg    = tempCookieFile ? `--cookies "${tempCookieFile}"` : getStaticCookieArg();
 
@@ -465,7 +538,6 @@ app.post('/api/audio/start', async (req, res) => {
 
   try {
     if (isYoutube) {
-      // ── YouTube audio ───────────────────────────────────────────────────────
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`, { timeout: 15000 }
@@ -473,17 +545,16 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-   await execPromise(
-  `yt-dlp -f "bestaudio" --extract-audio --audio-format m4a `
-  + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-  { timeout: 300000 }
-);
+      console.log('🎵 YouTube audio → m4a');
+      await execPromise(
+        `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
+        + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+        { timeout: 300000 }
+      );
 
     } else if (isTikTok) {
-      // ── TikTok audio ───────────────────────────────────────────────────────
       const tkArgs      = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
       const resolvedUrl = await resolveTikTokUrl(url);
-
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist ${tkArgs} "${resolvedUrl}"`, { timeout: 15000 }
@@ -499,7 +570,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
 
     } else if (isInstagram) {
-      // ── Instagram audio ────────────────────────────────────────────────────
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 }
@@ -515,7 +585,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
 
     } else {
-      // ── Digər ──────────────────────────────────────────────────────────────
       try {
         const { stdout } = await execPromise(
           `yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 }
@@ -531,7 +600,6 @@ app.post('/api/audio/start', async (req, res) => {
       );
     }
 
-    // Faylı tap
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
     if (!actualPath) throw new Error('Audio fayl tapılmadı');
 
@@ -545,7 +613,7 @@ app.post('/api/audio/start', async (req, res) => {
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
     console.log(`✅ Audio: ${(stats.size / 1024 / 1024).toFixed(1)} MB → ${filename}`);
 
-    res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size });
+    res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size, title });
 
   } catch (err) {
     console.error(`❌ Audio xətası: ${err.message}`);
