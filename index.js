@@ -36,7 +36,6 @@ function getStaticCookieArg() {
   catch { return ''; }
 }
 
-// Flutter-dən "name=value; name2=value2" → Netscape formatı
 function createTempCookieFile(cookieString, fileId) {
   if (!cookieString || typeof cookieString !== 'string' || !cookieString.trim()) return null;
   try {
@@ -62,6 +61,28 @@ function createTempCookieFile(cookieString, fileId) {
 function deleteTempFile(filePath) {
   if (!filePath) return;
   try { fs.unlinkSync(filePath); } catch (_) {}
+}
+
+// ─── Youtubei.js client ───────────────────────────────────────────────────────
+// yt-dlp JS runtime tələb edir → Render-də yoxdur → "Signature solving failed"
+// youtubei.js saf Node.js-dir, heç bir xarici runtime lazım deyil
+let ytClient = null;
+async function getYouTubeClient() {
+  if (ytClient) return ytClient;
+  const { Innertube } = await import('youtubei.js');
+  ytClient = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
+  console.log('✅ Innertube client hazırdır');
+  return ytClient;
+}
+getYouTubeClient().catch(e => console.log('⚠️ Innertube init xətası:', e.message));
+
+function extractVideoId(url) {
+  try {
+    const uri = new URL(url);
+    if (uri.hostname === 'youtu.be') return uri.pathname.slice(1).split('?')[0];
+    if (uri.pathname.includes('/shorts/')) return uri.pathname.split('/shorts/')[1].split('?')[0];
+    return uri.searchParams.get('v');
+  } catch { return null; }
 }
 
 // ─── Yardımçılar ──────────────────────────────────────────────────────────────
@@ -118,8 +139,6 @@ app.get('/api/health', (req, res) => {
 });
 
 // ─── Info ─────────────────────────────────────────────────────────────────────
-// FIX 1: cookieString qəbul edilir
-// FIX 2: YouTube hissəsi yt-dlp ilə metadata + keyfiyyət siyahısı qaytarır
 app.post('/api/info', async (req, res) => {
   const { url, cookieString } = req.body;
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
@@ -130,7 +149,6 @@ app.post('/api/info', async (req, res) => {
   const isInstagram = url.includes('instagram.com');
 
   try {
-
     // ── YouTube ───────────────────────────────────────────────────────────────
     if (isYoutube) {
       const fileId = crypto.randomBytes(8).toString('hex');
@@ -140,7 +158,6 @@ app.post('/api/info', async (req, res) => {
       console.log(`🎬 YouTube info | cookie: ${tempCookieFile ? 'flutter' : (ytCookieArg ? 'statik' : 'yoxdur')}`);
 
       let title = 'YouTube Video', thumbnail = '', duration = '00:00', uploader = '';
-
       const strategies = [
         '--extractor-args "youtube:player_client=tv_embedded"',
         '--extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"',
@@ -173,43 +190,20 @@ app.post('/api/info', async (req, res) => {
         uploader  = rawData.uploader  || rawData.channel || '';
       }
 
-      // Keyfiyyət siyahısını qur
       const qualities = [];
       const audioBest = formats
         .filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'))
         .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
 
-      // 1080p — DASH (needsMerge: true)
-      const v1080 = formats
-        .filter(f => f.height === 1080 && f.vcodec && f.vcodec !== 'none' && (!f.acodec || f.acodec === 'none'))
-        .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
-
-      if (v1080 && audioBest) {
-        qualities.push({
-          label: '1080p Full HD',
-          value: '1080p',
-          videoFormatId: v1080.format_id,
-          audioFormatId: audioBest.format_id,
-          filesize: (v1080.filesize || 0) + (audioBest.filesize || 0),
-          ext: 'mp4',
-          needsMerge: true,
-        });
-      }
-
-      // 720p, 480p, 360p
-      for (const res of [720, 480, 360]) {
+      for (const res of [1080, 720, 480, 360]) {
         const combined = formats
           .filter(f => f.height === res && f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none')
           .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
-
         if (combined) {
           qualities.push({
-            label: res === 720 ? '720p HD' : `${res}p`,
-            value: `${res}p`,
-            formatId: combined.format_id,
-            filesize: combined.filesize || null,
-            ext: 'mp4',
-            needsMerge: false,
+            label: res === 1080 ? '1080p Full HD' : res === 720 ? '720p HD' : `${res}p`,
+            value: `${res}p`, formatId: combined.format_id,
+            filesize: combined.filesize || null, ext: 'mp4', needsMerge: false,
           });
         } else if (audioBest) {
           const vOnly = formats
@@ -217,42 +211,31 @@ app.post('/api/info', async (req, res) => {
             .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
           if (vOnly) {
             qualities.push({
-              label: res === 720 ? '720p HD' : `${res}p`,
-              value: `${res}p`,
-              videoFormatId: vOnly.format_id,
-              audioFormatId: audioBest.format_id,
-              filesize: (vOnly.filesize || 0) + (audioBest.filesize || 0),
-              ext: 'mp4',
-              needsMerge: true,
+              label: res === 1080 ? '1080p Full HD' : res === 720 ? '720p HD' : `${res}p`,
+              value: `${res}p`, videoFormatId: vOnly.format_id, audioFormatId: audioBest.format_id,
+              filesize: (vOnly.filesize || 0) + (audioBest.filesize || 0), ext: 'mp4', needsMerge: true,
             });
           }
         }
       }
 
-      // Audio
       if (audioBest) {
         qualities.push({
-          label: 'MP3 (Audio)',
-          value: 'audio',
-          formatId: audioBest.format_id,
-          filesize: audioBest.filesize || null,
-          ext: 'm4a',
-          needsMerge: false,
+          label: 'MP3 (Audio)', value: 'audio',
+          formatId: audioBest.format_id, filesize: audioBest.filesize || null,
+          ext: 'm4a', needsMerge: false,
         });
       }
 
-      // Heç bir format tapılmadısa — default siyahı
       if (qualities.length === 0) {
         qualities.push(
           { label: '720p HD',     value: '720p',  ext: 'mp4', needsMerge: false },
           { label: '480p',        value: '480p',  ext: 'mp4', needsMerge: false },
-          { label: '360p',        value: '360p',  ext: 'mp4', needsMerge: false },
           { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a', needsMerge: false },
         );
       }
 
       deleteTempFile(tempCookieFile);
-
       return res.json({
         success: true,
         data: { title, thumbnail, duration, platform: 'youtube', uploader, qualities },
@@ -268,13 +251,11 @@ app.post('/api/info', async (req, res) => {
           error: 'Bu TikTok foto paylaşımıdır. Yalnız videolar yüklənə bilər.',
         });
       }
-
       let title = 'Video', thumbnail = '', duration = '00:00', uploader = '';
       const tkArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
       const tiktokCookiePath = '/tmp/tiktok-cookies/tiktok.txt';
       let tiktokCookieArg = '';
       try { fs.accessSync(tiktokCookiePath); tiktokCookieArg = `--cookies "${tiktokCookiePath}"`; } catch {}
-
       try {
         const { stdout } = await execPromise(
           `yt-dlp --no-playlist --socket-timeout 15 ${tkArgs} ${tiktokCookieArg} `
@@ -282,21 +263,13 @@ app.post('/api/info', async (req, res) => {
           { timeout: 25000 }
         );
         const parts = stdout.trim().split('|||');
-        title     = parts[0]?.trim() || 'Video';
-        thumbnail = parts[1]?.trim() || '';
-        duration  = formatDuration(parseFloat(parts[2]) || 0);
-        uploader  = parts[3]?.trim() || '';
+        title = parts[0]?.trim() || 'Video'; thumbnail = parts[1]?.trim() || '';
+        duration = formatDuration(parseFloat(parts[2]) || 0); uploader = parts[3]?.trim() || '';
       } catch (e) { console.log('⚠️ TikTok metadata xətası:', e.message); }
-
       return res.json({
         success: true,
-        data: {
-          title, thumbnail, duration, platform: 'tiktok', uploader,
-          qualities: [
-            { label: 'HD Video',    value: 'video', ext: 'mp4' },
-            { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
-          ],
-        },
+        data: { title, thumbnail, duration, platform: 'tiktok', uploader,
+          qualities: [{ label: 'HD Video', value: 'video', ext: 'mp4' }, { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' }] },
       });
     }
 
@@ -310,21 +283,13 @@ app.post('/api/info', async (req, res) => {
           { timeout: 25000 }
         );
         const parts = stdout.trim().split('|||');
-        title     = parts[0]?.trim() || 'Video';
-        thumbnail = parts[1]?.trim() || '';
-        duration  = formatDuration(parseFloat(parts[2]) || 0);
-        uploader  = parts[3]?.trim() || '';
+        title = parts[0]?.trim() || 'Video'; thumbnail = parts[1]?.trim() || '';
+        duration = formatDuration(parseFloat(parts[2]) || 0); uploader = parts[3]?.trim() || '';
       } catch (e) { console.log('⚠️ Instagram metadata xətası:', e.message); }
-
       return res.json({
         success: true,
-        data: {
-          title, thumbnail, duration, platform: 'instagram', uploader,
-          qualities: [
-            { label: 'HD Video',    value: 'video', ext: 'mp4' },
-            { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' },
-          ],
-        },
+        data: { title, thumbnail, duration, platform: 'instagram', uploader,
+          qualities: [{ label: 'HD Video', value: 'video', ext: 'mp4' }, { label: 'MP3 (Audio)', value: 'audio', ext: 'm4a' }] },
       });
     }
 
@@ -337,12 +302,9 @@ app.post('/api/info', async (req, res) => {
         { timeout: 25000 }
       );
       const parts = stdout.trim().split('|||');
-      title     = parts[0]?.trim() || 'Video';
-      thumbnail = parts[1]?.trim() || '';
-      duration  = formatDuration(parseFloat(parts[2]) || 0);
-      uploader  = parts[3]?.trim() || '';
+      title = parts[0]?.trim() || 'Video'; thumbnail = parts[1]?.trim() || '';
+      duration = formatDuration(parseFloat(parts[2]) || 0); uploader = parts[3]?.trim() || '';
     } catch (e) { console.log('⚠️ Generic info xətası:', e.message); }
-
     return res.json({
       success: true,
       data: { title, thumbnail, duration, platform: 'other', uploader,
@@ -359,7 +321,6 @@ app.post('/api/info', async (req, res) => {
 // VIDEO DOWNLOAD — /api/download/*
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// FIX 3: cookieString qəbul edilir, ytCookieArg düzgün təyin edilir, fmtArg işlədilir
 app.post('/api/download/start', async (req, res) => {
   const { url, quality, cookieString, tiktokCookies } = req.body;
   if (!url || !quality) return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
@@ -378,7 +339,6 @@ app.post('/api/download/start', async (req, res) => {
     }
   }
 
-  // TikTok cookie
   let tiktokCookiePath = null;
   let tiktokCookieArg  = '';
   if (isTikTok && tiktokCookies && Array.isArray(tiktokCookies) && tiktokCookies.length > 0) {
@@ -397,7 +357,6 @@ app.post('/api/download/start', async (req, res) => {
     } catch (e) { console.log('⚠️ TikTok cookie xətası:', e.message); }
   }
 
-  // FIX: ytCookieArg burada düzgün təyin edilir (əvvəl yox idi)
   const tempYtCookieFile = isYoutube ? createTempCookieFile(cookieString, fileId) : null;
   const ytCookieArg      = tempYtCookieFile ? `--cookies "${tempYtCookieFile}"` : getStaticCookieArg();
 
@@ -412,20 +371,17 @@ app.post('/api/download/start', async (req, res) => {
     if (isYoutube) {
       try {
         const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`,
-          { timeout: 15000 }
+          `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`, { timeout: 15000 }
         );
         title = stdout.trim() || 'video';
       } catch (_) {}
 
-      // FIX: fmtArg həm hesablanır HƏM də işlədilir
-      const h = parseInt(quality); // "1080p"→1080, "720p"→720, "audio"→NaN
+      const h = parseInt(quality);
       const fmtArg = !isNaN(h)
         ? `bestvideo[height=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`
         : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best';
 
       console.log(`📥 YouTube video | format: ${fmtArg}`);
-
       await execPromise(
         `yt-dlp -f "${fmtArg}" ${ytCookieArg} --merge-output-format mp4 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
         { timeout: 300000 }
@@ -436,12 +392,10 @@ app.post('/api/download/start', async (req, res) => {
       const resolvedUrl = await resolveTikTokUrl(url);
       try {
         const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${resolvedUrl}"`,
-          { timeout: 15000 }
+          `yt-dlp --get-title --no-playlist ${tkArgs} ${tiktokCookieArg} "${resolvedUrl}"`, { timeout: 15000 }
         );
         title = stdout.trim() || 'video';
       } catch (_) {}
-
       console.log('📥 TikTok video');
       await execPromise(
         `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" ${tkArgs} ${tiktokCookieArg} --merge-output-format mp4 --no-playlist --retries 3 -o "${outputPath}" "${resolvedUrl}"`,
@@ -451,12 +405,10 @@ app.post('/api/download/start', async (req, res) => {
     } else if (isInstagram) {
       try {
         const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist "${url}"`,
-          { timeout: 15000 }
+          `yt-dlp --get-title --no-playlist "${url}"`, { timeout: 15000 }
         );
         title = stdout.trim() || 'video';
       } catch (_) {}
-
       console.log('📥 Instagram video');
       await execPromise(
         `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
@@ -465,14 +417,12 @@ app.post('/api/download/start', async (req, res) => {
 
     } else {
       await execPromise(
-        `yt-dlp -f "best" --no-playlist -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
+        `yt-dlp -f "best" --no-playlist -o "${outputPath}" "${url}"`, { timeout: 300000 }
       );
     }
 
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(tmpDir, fileId);
     if (!actualPath) throw new Error('Yüklənmiş fayl tapılmadı');
-
     const stats = fs.statSync(actualPath);
     if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
 
@@ -531,26 +481,43 @@ app.post('/api/audio/start', async (req, res) => {
   const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
   let title = 'audio';
 
+  // Cookie yalnız title əldə etmə üçün saxlanılır (youtubei.js cookie istifadə etmir)
   const tempCookieFile = isYoutube ? createTempCookieFile(cookieString, fileId) : null;
   const ytCookieArg    = tempCookieFile ? `--cookies "${tempCookieFile}"` : getStaticCookieArg();
 
-  console.log(`🍪 YT Cookie: ${tempCookieFile ? 'Flutter (dinamik)' : (ytCookieArg ? 'env (statik)' : 'yoxdur')}`);
-
   try {
     if (isYoutube) {
-      try {
-        const { stdout } = await execPromise(
-          `yt-dlp --get-title --no-playlist ${ytCookieArg} "${url}"`, { timeout: 15000 }
-        );
-        title = stdout.trim() || 'audio';
-      } catch (_) {}
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // FIX: yt-dlp "Signature solving failed" verir çünki Render-də JS runtime yoxdur
+      // Həll: youtubei.js — saf Node.js internal API, runtime tələb etmir
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      const videoId = extractVideoId(url);
+      if (!videoId) throw new Error('YouTube video ID tapılmadı');
 
-      console.log('🎵 YouTube audio → m4a');
-      await execPromise(
-        `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
-        + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+      console.log(`🎵 YouTube audio → youtubei.js | videoId: ${videoId}`);
+
+      const yt   = await getYouTubeClient();
+      const info = await yt.getBasicInfo(videoId);
+      title = info.basic_info?.title || 'audio';
+      console.log(`📄 Başlıq: ${title}`);
+
+      const stream = await yt.download(videoId, {
+        type: 'audio',
+        quality: 'best',
+        format: 'any',
+      });
+
+      const writeStream = fs.createWriteStream(outputPath);
+      for await (const chunk of stream) {
+        writeStream.write(chunk);
+      }
+      await new Promise((resolve, reject) => {
+        writeStream.end();
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+      });
+
+      console.log('✅ youtubei.js stream tamamlandı');
 
     } else if (isTikTok) {
       const tkArgs      = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
@@ -561,7 +528,6 @@ app.post('/api/audio/start', async (req, res) => {
         );
         title = stdout.trim() || 'audio';
       } catch (_) {}
-
       console.log('🎵 TikTok audio → m4a');
       await execPromise(
         `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
@@ -576,7 +542,6 @@ app.post('/api/audio/start', async (req, res) => {
         );
         title = stdout.trim() || 'audio';
       } catch (_) {}
-
       console.log('🎵 Instagram audio → m4a');
       await execPromise(
         `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
@@ -591,7 +556,6 @@ app.post('/api/audio/start', async (req, res) => {
         );
         title = stdout.trim() || 'audio';
       } catch (_) {}
-
       console.log('🎵 Generic audio → m4a');
       await execPromise(
         `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" `
@@ -602,7 +566,6 @@ app.post('/api/audio/start', async (req, res) => {
 
     let actualPath = fs.existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
     if (!actualPath) throw new Error('Audio fayl tapılmadı');
-
     const stats = fs.statSync(actualPath);
     if (stats.size === 0) throw new Error('Audio fayl boşdur');
 
@@ -612,7 +575,6 @@ app.post('/api/audio/start', async (req, res) => {
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
     console.log(`✅ Audio: ${(stats.size / 1024 / 1024).toFixed(1)} MB → ${filename}`);
-
     res.json({ success: true, fileId: `${fileId}_final`, filename, filesize: stats.size, title });
 
   } catch (err) {
