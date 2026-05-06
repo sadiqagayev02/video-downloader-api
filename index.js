@@ -476,12 +476,30 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      console.log('🎵 YouTube audio → m4a');
-      await execPromise(
-        `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
-        + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+console.log('🎵 YouTube audio → m4a');
+const ytStrategies = [
+  '--extractor-args "youtube:player_client=tv_embedded"',
+  '--extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"',
+  '--extractor-args "youtube:player_client=android_vr" --user-agent "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12)"',
+  '--extractor-args "youtube:player_client=web_creator"',
+  '--extractor-args "youtube:player_client=mweb"',
+  '',
+];
+let ytAudioDone = false;
+for (const strat of ytStrategies) {
+  try {
+    await execPromise(
+      `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
+      + `${strat} ${ytCookieArg} --no-playlist --retries 2 -o "${outputPath}" "${url}"`,
+      { timeout: 120000, maxBuffer: 5 * 1024 * 1024 }
+    );
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+      ytAudioDone = true;
+      break;
+    }
+  } catch (_) {}
+}
+if (!ytAudioDone) throw new Error('YouTube audio: bütün strategiyalar uğursuz');
 
     } else if (isTikTok) {
       // ── TikTok audio ───────────────────────────────────────────────────────
