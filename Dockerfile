@@ -2,6 +2,7 @@ FROM node:20-alpine
 
 RUN apk add --no-cache ffmpeg python3 py3-pip curl unzip bash
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+ENV PATH="/usr/local/bin:$PATH"
 RUN pip3 install -U yt-dlp --break-system-packages
 
 WORKDIR /app
