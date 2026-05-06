@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "build": "pip install -U yt-dlp",
     "start": "node index.js"
   },
   "dependencies": {
