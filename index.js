@@ -178,35 +178,35 @@ app.post('/api/info', async (req, res) => {
   const isInstagram = url.includes('instagram.com');
 
   try {
-    // ── YouTube ──────────────────────────────────────────────────────────────
-   if (isYoutube) {
-  console.log('🎵 YouTube audio → Innertube birbaşa');
-  try {
-    const yt = await getYouTubeClient();
-    const videoId = extractVideoId(url);
-    if (!videoId) throw new Error('Video ID tapılmadı');
-    
-    const info = await yt.getBasicInfo(videoId);
-    title = info.basic_info?.title || 'audio';
-    
-    const stream = await yt.download(videoId, {
-      type: 'audio',
-      quality: 'best',
-      format: 'm4a'
-    });
-    
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
-    fs.writeFileSync(outputPath, buffer);
-    
-  } catch (e) {
-    throw new Error(`Innertube audio: ${e.message}`);
-  }
-    // ── TikTok ────────────────────────────────────────────────────────────────
-    if (isTikTok) {
+    if (isYoutube) {
+      // YouTube audio → Innertube birbaşa
+      console.log('🎵 YouTube audio → Innertube');
+      try {
+        const yt = await getYouTubeClient();
+        const videoId = extractVideoId(url);
+        if (!videoId) throw new Error('Video ID tapılmadı');
+        
+        const info = await yt.getBasicInfo(videoId);
+        title = info.basic_info?.title || 'audio';
+        
+        const stream = await yt.download(videoId, {
+          type: 'audio',
+          quality: 'best',
+          format: 'm4a'
+        });
+        
+        const chunks = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        const buffer = Buffer.concat(chunks);
+        fs.writeFileSync(outputPath, buffer);
+        
+      } catch (e) {
+        throw new Error(`Innertube audio: ${e.message}`);
+      }
+
+    } else if (isTikTok) {
       const resolvedUrl = await resolveTikTokUrl(url);
       if (isTikTokPhotoUrl(resolvedUrl)) {
         return res.status(422).json({
