@@ -476,12 +476,11 @@ app.post('/api/audio/start', async (req, res) => {
         title = stdout.trim() || 'audio';
       } catch (_) {}
 
-      console.log('🎵 YouTube audio → m4a');
       await execPromise(
-        `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" `
-        + `${ytCookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
-        { timeout: 300000 }
-      );
+  `yt-dlp -f "bestaudio" --extract-audio --audio-format m4a `
+  + `${ytCookieArg} --no-cookies --no-playlist --retries 3 -o "${outputPath}" "${url}"`,
+  { timeout: 300000 }
+);
 
     } else if (isTikTok) {
       // ── TikTok audio ───────────────────────────────────────────────────────
