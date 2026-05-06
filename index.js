@@ -64,35 +64,29 @@ function deleteTempFile(filePath) {
 }
 
 // ─── Youtubei.js client ───────────────────────────────────────────────────────
-// yt-dlp JS runtime tələb edir → Render-də yoxdur → "Signature solving failed"
-// youtubei.js saf Node.js-dir, heç bir xarici runtime lazım deyil
-//
-// cookieString varsa → cookie ilə yeni client (login-required videolar üçün)
-// cookieString yoxdursa → anonim client (cache-dən)
+// generate_session_locally: true → "No valid URL to decipher" xətasını həll edir
 let ytClientAnon = null;
 
 async function getYouTubeClient(cookieString) {
-  const { Innertube } = await import('youtubei.js');
-
-  // Cookie varsa — hər dəfə təzə client yarat (fərqli istifadəçilər üçün)
+  const { Innertube } = await import("youtubei.js");
+  const baseOpts = {
+    lang: "en",
+    location: "US",
+    retrieve_player: true,
+    generate_session_locally: true,
+  };
   if (cookieString && cookieString.trim()) {
-    console.log('🍪 Innertube: cookie ilə client yaradılır');
-    return await Innertube.create({
-      lang: 'en',
-      location: 'US',
-      retrieve_player: true,
-      cookie: cookieString.trim(),
-    });
+    console.log("🍪 Innertube: cookie ilə client yaradılır");
+    return await Innertube.create({ ...baseOpts, cookie: cookieString.trim() });
   }
-
-  // Cookie yoxdursa — anonim client cache-dən
   if (ytClientAnon) return ytClientAnon;
-  ytClientAnon = await Innertube.create({ lang: 'en', location: 'US', retrieve_player: true });
-  console.log('✅ Innertube anonim client hazırdır');
+  ytClientAnon = await Innertube.create(baseOpts);
+  console.log("✅ Innertube anonim client hazırdır");
   return ytClientAnon;
 }
 
-getYouTubeClient(null).catch(e => console.log('⚠️ Innertube init xətası:', e.message));
+getYouTubeClient(null).catch(e => console.log("⚠️ Innertube init xətası:", e.message));
+
 
 function extractVideoId(url) {
   try {
@@ -523,6 +517,7 @@ app.post('/api/audio/start', async (req, res) => {
         type: 'audio',
         quality: 'best',
         format: 'any',
+        client: 'ANDROID',
       });
 
       const writeStream = fs.createWriteStream(outputPath);
