@@ -1,0 +1,23 @@
+# render.yaml
+services:
+  - type: web
+    name: video-downloader-api
+    env: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TMP_DIR
+        value: /tmp/video-downloader
+      - key: AUDIO_DIR
+        value: /tmp/audio-downloader
+      - key: YOUTUBE_COOKIE_BASE64
+        sync: false
+    disk:
+      name: tmp
+      mountPath: /tmp
+      sizeGB: 1
