@@ -19,24 +19,54 @@ router.post('/start', async (req, res) => {
   }
 
   const fileId = crypto.randomBytes(16).toString('hex');
-  console.log(`📥 Download başladı: ${url.substring(0, 60)}, keyfiyyət: ${quality}, platform: ${platform || 'auto'}, ID: ${fileId}`);
+  console.log(`📥 Download: ${url.substring(0, 60)}, quality: ${quality}, platform: ${platform || 'auto'}, ID: ${fileId}`);
 
   const timeoutHandle = setTimeout(() => {
     if (!res.headersSent) {
       console.error('⏱️ Request timeout');
-      res.status(503).json({ error: 'Server vaxtı keçdi. Yenidən cəhd edin.', retryable: true });
+      res.status(503).json({
+        error: 'Server vaxtı keçdi. Yenidən cəhd edin.',
+        retryable: true,
+      });
     }
   }, REQUEST_TIMEOUT);
 
   try {
     await ensureTmpDir();
 
+    // ── YouTube AUDIO: getVideoInfo() bypass ─────────────────────────────
+    // Render datacenter IP → YouTube bot check → getVideoInfo() fail edir
+    // Həll: info almadan birbaşa downloadYoutubeAudio() çağır
+    if (platform === 'youtube' && quality === 'audio') {
+      console.log(`🎵 YouTube audio: getVideoInfo() bypass, birbaşa yüklə`);
+      const outputPath = path.join(tmpDir, `out_${fileId}.m4a`);
+
+      await ytdlpService.downloadYoutubeAudio(url, outputPath);
+
+      const stats = await fs.stat(outputPath);
+      if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
+
+      console.log(`✅ YouTube audio tamamlandı: ${(stats.size / 1024 / 1024).toFixed(1)} MB`);
+      clearTimeout(timeoutHandle);
+
+      if (!res.headersSent) {
+        res.json({
+          success:  true,
+          fileId,
+          filename: 'audio.m4a',
+          filesize: stats.size,
+        });
+      }
+      return;
+    }
+
+    // ── Digər platformlar: normal flow ────────────────────────────────────
     console.log(`📡 Video info alınır...`);
     const videoInfo       = await ytdlpService.getVideoInfo(url);
     const selectedQuality = videoInfo.qualities.find(q => q.value === quality);
 
-    console.log(`✅ Info alındı: "${videoInfo.title}" | platform: ${videoInfo.platform}`);
-    console.log(`📋 Mövcud keyfiyyətlər: ${videoInfo.qualities.map(q => q.value).join(', ')}`);
+    console.log(`✅ Info: "${videoInfo.title}" | platform: ${videoInfo.platform}`);
+    console.log(`📋 Keyfiyyətlər: ${videoInfo.qualities.map(q => q.value).join(', ')}`);
 
     if (!selectedQuality) {
       throw new Error(
@@ -46,9 +76,7 @@ router.post('/start', async (req, res) => {
 
     console.log(`🎯 Seçilən: label="${selectedQuality.label}" source="${selectedQuality._source}"`);
 
-    const source = selectedQuality._source || '';
-
-    // ── Audio yoxlaması ──────────────────────────────────────────────────────
+    const source  = selectedQuality._source || '';
     const isAudio = quality === 'audio' ||
       selectedQuality.ext === 'm4a' ||
       selectedQuality.ext === 'mp3' ||
@@ -59,7 +87,7 @@ router.post('/start', async (req, res) => {
     let outputPath;
     let ext;
 
-    // ── AUDIO DOWNLOAD ───────────────────────────────────────────────────────
+    // ── AUDIO DOWNLOAD ────────────────────────────────────────────────────
     if (isAudio) {
       ext        = 'm4a';
       outputPath = path.join(tmpDir, `out_${fileId}.m4a`);
@@ -68,26 +96,23 @@ router.post('/start', async (req, res) => {
       console.log(`🎵 AUDIO download: platform=${detectedPlatform}, source=${source}`);
 
       if (source === 'tiktok_audio' || detectedPlatform === 'tiktok') {
-        // TikTok: audio-only stream yoxdur → video yüklə → ffmpeg extract
-        console.log(`🎵 TikTok audio: video→ffmpeg strategiyası`);
+        console.log(`🎵 TikTok audio: video→ffmpeg`);
         await ytdlpService.downloadTikTokAudio(url, outputPath);
 
       } else if (source === 'instagram_audio' || detectedPlatform === 'instagram') {
-        console.log(`🎵 Instagram audio download`);
+        console.log(`🎵 Instagram audio`);
         await ytdlpService.downloadAudio(url, outputPath, 'instagram');
 
       } else if (source === 'facebook_audio' || detectedPlatform === 'facebook') {
-        console.log(`🎵 Facebook audio download`);
+        console.log(`🎵 Facebook audio`);
         await ytdlpService.downloadAudio(url, outputPath, 'facebook');
 
       } else if (detectedPlatform === 'youtube') {
-        // YouTube audio → server-side (APK-da stream URL 403 verir)
-        console.log(`🎵 YouTube audio server-side download`);
+        console.log(`🎵 YouTube audio server-side`);
         await ytdlpService.downloadYoutubeAudio(url, outputPath);
 
       } else if (selectedQuality.url) {
-        // Invidious CDN URL — birbaşa yüklə
-        console.log(`🎵 Invidious CDN audio download`);
+        console.log(`🎵 Invidious CDN audio`);
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
 
       } else if (
@@ -95,17 +120,15 @@ router.post('/start', async (req, res) => {
         selectedQuality.formatId !== 'bestaudio' &&
         selectedQuality.formatId !== 'bestaudio[ext=m4a]'
       ) {
-        // Konkret format ID (YouTube yt-dlp)
-        console.log(`🎵 Format ID audio download: ${selectedQuality.formatId}`);
+        console.log(`🎵 Format ID audio: ${selectedQuality.formatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
 
       } else {
-        // Generic fallback
-        console.log(`🎵 Generic audio download`);
+        console.log(`🎵 Generic audio: ${detectedPlatform}`);
         await ytdlpService.downloadAudio(url, outputPath, detectedPlatform);
       }
 
-    // ── VIDEO DOWNLOAD ───────────────────────────────────────────────────────
+    // ── VIDEO DOWNLOAD ────────────────────────────────────────────────────
     } else {
       ext        = selectedQuality.ext || 'mp4';
       outputPath = path.join(tmpDir, `out_${fileId}.${ext}`);
@@ -114,8 +137,7 @@ router.post('/start', async (req, res) => {
       console.log(`🎬 VIDEO download: source=${source}, platform=${detectedPlatform}`);
 
       if (selectedQuality.needsMerge) {
-        // DASH: video + audio ayrı yüklə, birləşdir
-        console.log('🔄 Merge rejimi');
+        console.log('🔄 DASH merge rejimi');
         const videoPath = path.join(tmpDir, `video_${fileId}.mp4`);
         const audioPath = path.join(tmpDir, `audio_${fileId}.m4a`);
         outputPath      = path.join(tmpDir, `out_${fileId}.mp4`);
@@ -142,7 +164,7 @@ router.post('/start', async (req, res) => {
         await ytdlpService.downloadInstagram(url, outputPath);
 
       } else if (source === 'facebook_direct' || source === 'generic_direct') {
-        console.log(`👤 Facebook/Generic direct (${detectedPlatform})`);
+        console.log(`👤 Facebook/Generic: ${detectedPlatform}`);
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadDirect(url, outputPath, detectedPlatform);
 
@@ -151,7 +173,7 @@ router.post('/start', async (req, res) => {
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
 
       } else if (selectedQuality.formatId) {
-        console.log(`📀 Format ID yükləmə: ${selectedQuality.formatId}`);
+        console.log(`📀 Format ID: ${selectedQuality.formatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
 
       } else {
@@ -159,7 +181,7 @@ router.post('/start', async (req, res) => {
       }
     }
 
-    // ── Fayl yoxlaması ───────────────────────────────────────────────────────
+    // ── Fayl yoxlaması ────────────────────────────────────────────────────
     const stats = await fs.stat(outputPath);
     if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
 
@@ -170,7 +192,6 @@ router.post('/start', async (req, res) => {
       .substring(0, 80) || 'video';
 
     console.log(`✅ Tamamlandı: ${outputPath} (${sizeMB} MB)`);
-
     clearTimeout(timeoutHandle);
 
     if (!res.headersSent) {
@@ -186,7 +207,7 @@ router.post('/start', async (req, res) => {
     clearTimeout(timeoutHandle);
     console.error('❌ Download xətası:', err.message);
 
-    // Müvəqqəti faylları təmizlə
+    // Temp faylları təmizlə
     try {
       const files = await fs.readdir(tmpDir);
       for (const file of files) {
@@ -197,7 +218,8 @@ router.post('/start', async (req, res) => {
     } catch (_) {}
 
     if (!res.headersSent) {
-      const isRetryable = err.message.includes('uğursuz') ||
+      const isRetryable =
+        err.message.includes('uğursuz') ||
         err.message.includes('timeout') ||
         err.message.includes('network');
 
@@ -256,7 +278,6 @@ async function ensureTmpDir() {
     console.log(`📁 Temp qovluq yaradıldı: ${tmpDir}`);
   }
 
-  // Köhnə faylları təmizlə (1 saatdan köhnə)
   try {
     const files = await fs.readdir(tmpDir);
     const now   = Date.now();
