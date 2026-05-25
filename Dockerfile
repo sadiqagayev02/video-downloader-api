@@ -1,4 +1,3 @@
-# Dockerfile
 FROM node:20-alpine
 
 # Sistem paketləri
@@ -18,34 +17,23 @@ RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 # yt-dlp quraşdır
 RUN pip3 install -U yt-dlp --break-system-packages
 
-# yt-dlp versiyasını yoxla
+# Versiyaları yoxla
 RUN yt-dlp --version
-
-# FFmpeg versiyasını yoxla
 RUN ffmpeg -version | head -1
 
-# İş qovluğu
 WORKDIR /app
 
-# package.json kopyala və dependencies quraşdır
 COPY package.json ./
 RUN npm install --no-package-lock --production
 
-# Bütün faylları kopyala
 COPY . .
 
-# Tmp qovluqları yarat
 RUN mkdir -p /tmp/video-downloader /tmp/audio-downloader /tmp/yt-cookies /tmp/tiktok-cookies
-
-# İcazələri təyin et
 RUN chmod -R 777 /tmp/video-downloader /tmp/audio-downloader /tmp/yt-cookies /tmp/tiktok-cookies
 
-# Health check
+EXPOSE 3000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3000/api/health || exit 1
 
-# Port
-EXPOSE 3000
-
-# Başlat
 CMD ["node", "index.js"]
