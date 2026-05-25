@@ -12,14 +12,14 @@ const REQUEST_TIMEOUT = 120000;
 
 // ─── Download başlat ──────────────────────────────────────────────────────────
 router.post('/start', async (req, res) => {
-  const { url, quality, platform, cookies } = req.body;   // ← cookies YENİ
+  const { url, quality, platform } = req.body;
 
   if (!url || !quality) {
     return res.status(400).json({ error: 'URL və keyfiyyət tələb olunur' });
   }
 
   const fileId = crypto.randomBytes(16).toString('hex');
-  console.log(`📥 Download: ${url.substring(0, 60)}, quality: ${quality}, platform: ${platform || 'auto'}, ID: ${fileId}`);
+  console.log(`📥 Download başladı: ${url.substring(0, 60)}, keyfiyyət: ${quality}, platform: ${platform || 'auto'}, ID: ${fileId}`);
 
   const timeoutHandle = setTimeout(() => {
     if (!res.headersSent) {
@@ -28,29 +28,15 @@ router.post('/start', async (req, res) => {
     }
   }, REQUEST_TIMEOUT);
 
-  // Cookie faylının yolu — request bitdikdən sonra silinir
-  let cookiePath = null;
-
   try {
     await ensureTmpDir();
 
-    // ── Cookie faylını yaz ────────────────────────────────────────────────
-    // Flutter Netscape formatında göndərir, yt-dlp birbaşa qəbul edir
-    if (cookies && typeof cookies === 'string' && cookies.trim().length > 0) {
-      cookiePath = path.join(tmpDir, `cookies_${fileId}.txt`);
-      await fs.writeFile(cookiePath, cookies, 'utf8');
-      console.log(`🍪 Cookie faylı yazıldı (${cookies.split('\n').length - 3} cookie)`);
-    } else {
-      console.log(`⚠️ Cookie göndərilmədi — yt-dlp bot check ilə uğursuz ola bilər`);
-    }
-
-    // ── Video info ────────────────────────────────────────────────────────
     console.log(`📡 Video info alınır...`);
-    const videoInfo       = await ytdlpService.getVideoInfo(url, cookiePath);
+    const videoInfo       = await ytdlpService.getVideoInfo(url);
     const selectedQuality = videoInfo.qualities.find(q => q.value === quality);
 
-    console.log(`✅ Info: "${videoInfo.title}" | platform: ${videoInfo.platform}`);
-    console.log(`📋 Keyfiyyətlər: ${videoInfo.qualities.map(q => q.value).join(', ')}`);
+    console.log(`✅ Info alındı: "${videoInfo.title}" | platform: ${videoInfo.platform}`);
+    console.log(`📋 Mövcud keyfiyyətlər: ${videoInfo.qualities.map(q => q.value).join(', ')}`);
 
     if (!selectedQuality) {
       throw new Error(
@@ -79,24 +65,29 @@ router.post('/start', async (req, res) => {
       outputPath = path.join(tmpDir, `out_${fileId}.m4a`);
       const detectedPlatform = platform || videoInfo.platform || 'other';
 
-      console.log(`🎵 AUDIO: platform=${detectedPlatform}, source=${source}`);
+      console.log(`🎵 AUDIO download: platform=${detectedPlatform}, source=${source}`);
 
       if (source === 'tiktok_audio' || detectedPlatform === 'tiktok') {
+        // TikTok: audio-only stream yoxdur → video yüklə → ffmpeg extract
+        console.log(`🎵 TikTok audio: video→ffmpeg strategiyası`);
         await ytdlpService.downloadTikTokAudio(url, outputPath);
 
       } else if (source === 'instagram_audio' || detectedPlatform === 'instagram') {
+        console.log(`🎵 Instagram audio download`);
         await ytdlpService.downloadAudio(url, outputPath, 'instagram');
 
       } else if (source === 'facebook_audio' || detectedPlatform === 'facebook') {
+        console.log(`🎵 Facebook audio download`);
         await ytdlpService.downloadAudio(url, outputPath, 'facebook');
 
       } else if (detectedPlatform === 'youtube') {
-        // ← cookie faylı ötürülür
-        console.log(`🎵 YouTube audio: cookiePath=${cookiePath || 'YOX'}`);
-        await ytdlpService.downloadYoutubeAudio(url, outputPath, cookiePath);
+        // YouTube audio → server-side (APK-da stream URL 403 verir)
+        console.log(`🎵 YouTube audio server-side download`);
+        await ytdlpService.downloadYoutubeAudio(url, outputPath);
 
       } else if (selectedQuality.url) {
-        console.log(`🎵 Invidious CDN audio`);
+        // Invidious CDN URL — birbaşa yüklə
+        console.log(`🎵 Invidious CDN audio download`);
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
 
       } else if (
@@ -104,11 +95,13 @@ router.post('/start', async (req, res) => {
         selectedQuality.formatId !== 'bestaudio' &&
         selectedQuality.formatId !== 'bestaudio[ext=m4a]'
       ) {
-        console.log(`🎵 Format ID audio: ${selectedQuality.formatId}`);
+        // Konkret format ID (YouTube yt-dlp)
+        console.log(`🎵 Format ID audio download: ${selectedQuality.formatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
 
       } else {
-        console.log(`🎵 Generic audio: ${detectedPlatform}`);
+        // Generic fallback
+        console.log(`🎵 Generic audio download`);
         await ytdlpService.downloadAudio(url, outputPath, detectedPlatform);
       }
 
@@ -118,15 +111,19 @@ router.post('/start', async (req, res) => {
       outputPath = path.join(tmpDir, `out_${fileId}.${ext}`);
       const detectedPlatform = platform || videoInfo.platform || 'other';
 
-      console.log(`🎬 VIDEO: source=${source}, platform=${detectedPlatform}`);
+      console.log(`🎬 VIDEO download: source=${source}, platform=${detectedPlatform}`);
 
       if (selectedQuality.needsMerge) {
+        // DASH: video + audio ayrı yüklə, birləşdir
         console.log('🔄 Merge rejimi');
         const videoPath = path.join(tmpDir, `video_${fileId}.mp4`);
         const audioPath = path.join(tmpDir, `audio_${fileId}.m4a`);
         outputPath      = path.join(tmpDir, `out_${fileId}.mp4`);
 
+        console.log(`📥 Video format: ${selectedQuality.videoFormatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.videoFormatId, videoPath);
+
+        console.log(`📥 Audio format: ${selectedQuality.audioFormatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.audioFormatId, audioPath);
 
         console.log(`🔀 FFmpeg merge...`);
@@ -135,21 +132,26 @@ router.post('/start', async (req, res) => {
         console.log(`✅ Merge tamamlandı`);
 
       } else if (source === 'tiktok_direct') {
+        console.log('🎵 TikTok video fallback chain');
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadTikTok(url, outputPath);
 
       } else if (source === 'instagram_direct') {
+        console.log('📸 Instagram video fallback chain');
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadInstagram(url, outputPath);
 
       } else if (source === 'facebook_direct' || source === 'generic_direct') {
+        console.log(`👤 Facebook/Generic direct (${detectedPlatform})`);
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadDirect(url, outputPath, detectedPlatform);
 
       } else if (selectedQuality.url) {
+        console.log('📀 CDN URL yükləmə');
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
 
       } else if (selectedQuality.formatId) {
+        console.log(`📀 Format ID yükləmə: ${selectedQuality.formatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
 
       } else {
@@ -169,10 +171,6 @@ router.post('/start', async (req, res) => {
 
     console.log(`✅ Tamamlandı: ${outputPath} (${sizeMB} MB)`);
 
-    // Cookie faylını sil (artıq lazım deyil)
-    await removeCookieFile(cookiePath);
-    cookiePath = null;
-
     clearTimeout(timeoutHandle);
 
     if (!res.headersSent) {
@@ -187,9 +185,6 @@ router.post('/start', async (req, res) => {
   } catch (err) {
     clearTimeout(timeoutHandle);
     console.error('❌ Download xətası:', err.message);
-
-    // Cookie faylını sil
-    await removeCookieFile(cookiePath);
 
     // Müvəqqəti faylları təmizlə
     try {
@@ -252,8 +247,7 @@ router.get('/file/:fileId', async (req, res) => {
   });
 });
 
-// ─── Yardımçılar ──────────────────────────────────────────────────────────────
-
+// ─── Yardımçı ─────────────────────────────────────────────────────────────────
 async function ensureTmpDir() {
   try {
     await fs.access(tmpDir);
@@ -276,15 +270,6 @@ async function ensureTmpDir() {
       }
     }
     if (deleted > 0) console.log(`🧹 ${deleted} köhnə fayl silindi`);
-  } catch (_) {}
-}
-
-// Cookie faylını sil (mövcuddursa)
-async function removeCookieFile(cookiePath) {
-  if (!cookiePath) return;
-  try {
-    await fs.unlink(cookiePath);
-    console.log(`🍪 Cookie faylı silindi`);
   } catch (_) {}
 }
 
