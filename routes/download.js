@@ -3,12 +3,22 @@ const router         = express.Router();
 const fs             = require('fs').promises;
 const path           = require('path');
 const crypto         = require('crypto');
+const { exec }       = require('child_process');
+const util           = require('util');
+const execPromise    = util.promisify(exec);
 const ytdlpService   = require('../services/ytdlpService');
 const mergeService   = require('../services/mergeService');
 const cleanupService = require('../services/cleanupService');
 
 const tmpDir          = process.env.TMP_DIR || '/tmp/video-downloader';
 const REQUEST_TIMEOUT = 120000;
+
+// ─── MP4 → MP3 çevrilmə (FFmpeg) ───────────────────────────────────────────
+async function toMp3(inputPath, outputPath) {
+  console.log(`🎵 MP4 → MP3 çevrilir: ${path.basename(inputPath)}`);
+  await execPromise(`ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -q:a 2 -y "${outputPath}"`);
+  console.log(`✅ MP3 çevrildi: ${path.basename(outputPath)}`);
+}
 
 // ─── Download başlat ──────────────────────────────────────────────────────────
 router.post('/start', async (req, res) => {
@@ -68,40 +78,21 @@ router.post('/start', async (req, res) => {
       console.log(`🎵 AUDIO download: platform=${detectedPlatform}, source=${source}`);
 
       if (source === 'tiktok_audio' || detectedPlatform === 'tiktok') {
-        // TikTok: audio-only stream yoxdur → video yüklə → ffmpeg extract
-        console.log(`🎵 TikTok audio: video→ffmpeg strategiyası`);
         await ytdlpService.downloadTikTokAudio(url, outputPath);
-
       } else if (source === 'instagram_audio' || detectedPlatform === 'instagram') {
-        console.log(`🎵 Instagram audio download`);
         await ytdlpService.downloadAudio(url, outputPath, 'instagram');
-
       } else if (source === 'facebook_audio' || detectedPlatform === 'facebook') {
-        console.log(`🎵 Facebook audio download`);
         await ytdlpService.downloadAudio(url, outputPath, 'facebook');
-
       } else if (detectedPlatform === 'youtube') {
-        // YouTube audio → server-side (APK-da stream URL 403 verir)
         console.log(`🎵 YouTube audio server-side download`);
         await ytdlpService.downloadYoutubeAudio(url, outputPath);
-
       } else if (selectedQuality.url) {
-        // Invidious CDN URL — birbaşa yüklə
-        console.log(`🎵 Invidious CDN audio download`);
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
-
-      } else if (
-        selectedQuality.formatId &&
-        selectedQuality.formatId !== 'bestaudio' &&
-        selectedQuality.formatId !== 'bestaudio[ext=m4a]'
-      ) {
-        // Konkret format ID (YouTube yt-dlp)
-        console.log(`🎵 Format ID audio download: ${selectedQuality.formatId}`);
+      } else if (selectedQuality.formatId &&
+          selectedQuality.formatId !== 'bestaudio' &&
+          selectedQuality.formatId !== 'bestaudio[ext=m4a]') {
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
-
       } else {
-        // Generic fallback
-        console.log(`🎵 Generic audio download`);
         await ytdlpService.downloadAudio(url, outputPath, detectedPlatform);
       }
 
@@ -114,19 +105,13 @@ router.post('/start', async (req, res) => {
       console.log(`🎬 VIDEO download: source=${source}, platform=${detectedPlatform}`);
 
       if (selectedQuality.needsMerge) {
-        // DASH: video + audio ayrı yüklə, birləşdir
         console.log('🔄 Merge rejimi');
         const videoPath = path.join(tmpDir, `video_${fileId}.mp4`);
         const audioPath = path.join(tmpDir, `audio_${fileId}.m4a`);
         outputPath      = path.join(tmpDir, `out_${fileId}.mp4`);
 
-        console.log(`📥 Video format: ${selectedQuality.videoFormatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.videoFormatId, videoPath);
-
-        console.log(`📥 Audio format: ${selectedQuality.audioFormatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.audioFormatId, audioPath);
-
-        console.log(`🔀 FFmpeg merge...`);
         await mergeService.mergeVideoAudio(videoPath, audioPath, outputPath);
         await mergeService.cleanupFiles(videoPath, audioPath);
         console.log(`✅ Merge tamamlandı`);
@@ -163,6 +148,17 @@ router.post('/start', async (req, res) => {
     const stats = await fs.stat(outputPath);
     if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
 
+    // ─── MP3 ÇEVİRMƏ (əgər tələb olunubsa) ───────────────────────────────────
+    if (quality === 'mp3' || quality === 'audio') {
+      console.log(`🎵 MP3 tələb olundu, MP4 → MP3 çevrilir...`);
+      const mp3Path = outputPath.replace(/\.(mp4|m4a)$/, '.mp3');
+      await toMp3(outputPath, mp3Path);
+      await fs.unlink(outputPath); // MP4/M4A faylını sil
+      outputPath = mp3Path;
+      ext = 'mp3';
+      console.log(`✅ MP3 hazırdır: ${path.basename(outputPath)}`);
+    }
+
     const sizeMB    = (stats.size / 1024 / 1024).toFixed(1);
     const safeTitle = (videoInfo.title || 'video')
       .replace(/[^\w\s\u0400-\u04FF\u0600-\u06FF-]/g, '')
@@ -186,7 +182,6 @@ router.post('/start', async (req, res) => {
     clearTimeout(timeoutHandle);
     console.error('❌ Download xətası:', err.message);
 
-    // Müvəqqəti faylları təmizlə
     try {
       const files = await fs.readdir(tmpDir);
       for (const file of files) {
@@ -256,7 +251,6 @@ async function ensureTmpDir() {
     console.log(`📁 Temp qovluq yaradıldı: ${tmpDir}`);
   }
 
-  // Köhnə faylları təmizlə (1 saatdan köhnə)
   try {
     const files = await fs.readdir(tmpDir);
     const now   = Date.now();
