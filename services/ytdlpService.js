@@ -6,6 +6,7 @@ const execPromise = util.promisify(exec);
 const EXEC_TIMEOUT = 20000;
 const DOWNLOAD_TIMEOUT = 200000;
 
+// ─── Cross-platform fayl ölçüsü yoxlaması ────────────────────────────────────
 async function getFileSize(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -15,6 +16,7 @@ async function getFileSize(filePath) {
   }
 }
 
+// ─── Cross-platform fayl silmə ───────────────────────────────────────────────
 async function removeFile(filePath) {
   try {
     await fs.unlink(filePath);
@@ -74,18 +76,10 @@ class YtDlpService {
     return url.includes('facebook.com') || url.includes('fb.watch') || url.includes('fb.com');
   }
 
-  // ─── cookieArg helper ─────────────────────────────────────────────────────
-  //
-  // cookiePath varsa --cookies flag qaytarır, yoxdursa boş string.
-  //
-  _cookieArg(cookiePath) {
-    return cookiePath ? `--cookies "${cookiePath}"` : '';
-  }
-
   // ─── Info ──────────────────────────────────────────────────────────────────
 
-  async getVideoInfo(url, cookiePath = null) {
-    if (this.isYouTube(url))   return await this.getYouTubeInfo(url, cookiePath);
+  async getVideoInfo(url) {
+    if (this.isYouTube(url))   return await this.getYouTubeInfo(url);
     if (this.isTikTok(url))    return await this.getTikTokInfo(url);
     if (this.isInstagram(url)) return await this.getInstagramInfo(url);
     if (this.isFacebook(url))  return await this.getFacebookInfo(url);
@@ -94,19 +88,14 @@ class YtDlpService {
 
   // ─── YouTube Info ──────────────────────────────────────────────────────────
 
-  async getYouTubeInfo(url, cookiePath = null) {
-    // Əvvəlcə Invidious cəhd et (cookie lazım deyil)
+  async getYouTubeInfo(url) {
     const inv = await this.tryInvidious(url);
     if (inv) return inv;
 
-    // Invidious uğursuz → yt-dlp + cookie
-    const cookieArg = this._cookieArg(cookiePath);
-
     for (const strategy of this.youtubeStrategies) {
       try {
-        console.log(`📡 YouTube strategiya: ${strategy.name}${cookiePath ? ' (cookie)' : ''}`);
-        const extraArgs = [cookieArg, strategy.args].filter(Boolean).join(' ');
-        const data = await this.extractWithArgs(url, extraArgs);
+        console.log(`📡 YouTube strategiya: ${strategy.name}`);
+        const data = await this.extractWithArgs(url, strategy.args);
         if (data?.formats) return this.processYouTubeData(data);
       } catch (err) {
         console.log(`⚠️ ${strategy.name} uğursuz: ${err.message.substring(0, 100)}`);
@@ -266,95 +255,145 @@ class YtDlpService {
     };
   }
 
-  // ─── TikTok / Instagram / Facebook / Generic Info ─────────────────────────
-  // (dəyişiklik yoxdur)
+  // ─── TikTok Info ───────────────────────────────────────────────────────────
 
   async getTikTokInfo(url) {
     let lastErr = null;
+
     for (const hostname of this.tiktokHostnames) {
       try {
+        console.log(`📡 TikTok info hostname: ${hostname}`);
         const args = `--extractor-args "tiktok:api_hostname=${hostname}" --socket-timeout 15`;
         const data = await this.extractWithArgs(url, args);
         if (data) return this.processTikTokData(data);
       } catch (err) {
+        console.log(`⚠️ TikTok hostname ${hostname} uğursuz: ${err.message.substring(0, 120)}`);
         lastErr = err;
       }
     }
+
     try {
+      console.log('📡 TikTok info: default (son cəhd)');
       const data = await this.extractWithArgs(url, '--socket-timeout 15');
       if (data) return this.processTikTokData(data);
-    } catch (err) { lastErr = err; }
+    } catch (err) {
+      lastErr = err;
+    }
+
     throw new Error(`TikTok məlumat alınmadı: ${lastErr?.message}`);
   }
 
   processTikTokData(data) {
     return {
-      title: data.title || 'TikTok Video',
+      title:     data.title || 'TikTok Video',
       thumbnail: data.thumbnail || '',
-      duration: this.formatDuration(data.duration || 0),
-      uploader: data.uploader || data.channel || '',
-      platform: 'tiktok',
+      duration:  this.formatDuration(data.duration || 0),
+      uploader:  data.uploader || data.channel || '',
+      platform:  'tiktok',
       qualities: [
-        { label: 'HD Video', value: 'video', formatId: 'best', url: null, filesize: null, ext: 'mp4', needsMerge: false, _source: 'tiktok_direct' },
-        { label: 'MP3 (Audio)', value: 'audio', formatId: 'bestaudio', url: null, filesize: null, ext: 'm4a', needsMerge: false, _source: 'tiktok_audio' },
+        {
+          label: 'HD Video', value: 'video',
+          formatId: 'best', url: null, filesize: null,
+          ext: 'mp4', needsMerge: false, _source: 'tiktok_direct',
+        },
+        {
+          label: 'MP3 (Audio)', value: 'audio',
+          formatId: 'bestaudio', url: null, filesize: null,
+          ext: 'm4a', needsMerge: false, _source: 'tiktok_audio',
+        },
       ],
     };
   }
 
+  // ─── Instagram Info ────────────────────────────────────────────────────────
+
   async getInstagramInfo(url) {
     let lastErr = null;
+
     for (const strategy of this.instagramStrategies) {
       try {
+        console.log(`📡 Instagram info: ${strategy.name}`);
         const data = await this.extractWithArgs(url, strategy.args);
         if (data) return this.processInstagramData(data);
-      } catch (err) { lastErr = err; }
+      } catch (err) {
+        console.log(`⚠️ Instagram ${strategy.name} uğursuz: ${err.message.substring(0, 120)}`);
+        lastErr = err;
+      }
     }
+
     throw new Error(`Instagram məlumat alınmadı: ${lastErr?.message}`);
   }
 
   processInstagramData(data) {
     return {
-      title: data.title || data.description?.substring(0, 80) || 'Instagram Video',
+      title:     data.title || data.description?.substring(0, 80) || 'Instagram Video',
       thumbnail: data.thumbnail || '',
-      duration: this.formatDuration(data.duration || 0),
-      uploader: data.uploader || data.channel || '',
-      platform: 'instagram',
+      duration:  this.formatDuration(data.duration || 0),
+      uploader:  data.uploader || data.channel || '',
+      platform:  'instagram',
       qualities: [
-        { label: 'HD Video', value: 'video', formatId: 'best', url: null, filesize: null, ext: 'mp4', needsMerge: false, _source: 'instagram_direct' },
-        { label: 'MP3 (Audio)', value: 'audio', formatId: 'bestaudio', url: null, filesize: null, ext: 'm4a', needsMerge: false, _source: 'instagram_audio' },
+        {
+          label: 'HD Video', value: 'video',
+          formatId: 'best', url: null, filesize: null,
+          ext: 'mp4', needsMerge: false, _source: 'instagram_direct',
+        },
+        {
+          label: 'MP3 (Audio)', value: 'audio',
+          formatId: 'bestaudio', url: null, filesize: null,
+          ext: 'm4a', needsMerge: false, _source: 'instagram_audio',
+        },
       ],
     };
   }
 
+  // ─── Facebook Info ─────────────────────────────────────────────────────────
+
   async getFacebookInfo(url) {
     let lastErr = null;
+
     const strategies = [
       '--add-header "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"',
       '--add-header "User-Agent:Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36"',
       '',
     ];
+
     for (const args of strategies) {
       try {
+        console.log(`📡 Facebook info: "${args.substring(0, 40) || 'default'}"`);
         const data = await this.extractWithArgs(url, `${args} --socket-timeout 15`);
         if (data) return this.processFacebookData(data);
-      } catch (err) { lastErr = err; }
+      } catch (err) {
+        console.log(`⚠️ Facebook info uğursuz: ${err.message.substring(0, 120)}`);
+        lastErr = err;
+      }
     }
+
     throw new Error(`Facebook məlumat alınmadı: ${lastErr?.message}`);
   }
 
   processFacebookData(data) {
     return {
-      title: data.title || data.description?.substring(0, 80) || 'Facebook Video',
+      title:     data.title || data.description?.substring(0, 80) || 'Facebook Video',
       thumbnail: data.thumbnail || '',
-      duration: this.formatDuration(data.duration || 0),
-      uploader: data.uploader || data.channel || '',
-      platform: 'facebook',
+      duration:  this.formatDuration(data.duration || 0),
+      uploader:  data.uploader || data.channel || '',
+      platform:  'facebook',
       qualities: [
-        { label: 'HD Video', value: 'video', formatId: 'best', url: null, filesize: null, ext: 'mp4', needsMerge: false, _source: 'facebook_direct' },
-        { label: 'MP3 (Audio)', value: 'audio', formatId: 'bestaudio', url: null, filesize: null, ext: 'm4a', needsMerge: false, _source: 'facebook_audio' },
+        {
+          label: 'HD Video', value: 'video',
+          formatId: 'best', url: null, filesize: null,
+          ext: 'mp4', needsMerge: false, _source: 'facebook_direct',
+        },
+        {
+          label: 'MP3 (Audio)', value: 'audio',
+          formatId: 'bestaudio', url: null, filesize: null,
+          ext: 'm4a', needsMerge: false, _source: 'facebook_audio',
+        },
       ],
     };
   }
+
+  // ─── Generic Info ──────────────────────────────────────────────────────────
 
   async getGenericInfo(url) {
     try {
@@ -369,15 +408,24 @@ class YtDlpService {
     let platform = 'other';
     if (url.includes('facebook.com') || url.includes('fb.watch')) platform = 'facebook';
     else if (url.includes('twitter.com') || url.includes('x.com')) platform = 'twitter';
+
     return {
-      title: data.title || 'Video',
+      title:     data.title || 'Video',
       thumbnail: data.thumbnail || '',
-      duration: this.formatDuration(data.duration || 0),
-      uploader: data.uploader || data.channel || '',
+      duration:  this.formatDuration(data.duration || 0),
+      uploader:  data.uploader || data.channel || '',
       platform,
       qualities: [
-        { label: 'HD Video', value: 'video', formatId: 'best', url: null, filesize: null, ext: 'mp4', needsMerge: false, _source: 'generic_direct' },
-        { label: 'MP3 (Audio)', value: 'audio', formatId: 'bestaudio', url: null, filesize: null, ext: 'm4a', needsMerge: false, _source: 'generic_audio' },
+        {
+          label: 'HD Video', value: 'video',
+          formatId: 'best', url: null, filesize: null,
+          ext: 'mp4', needsMerge: false, _source: 'generic_direct',
+        },
+        {
+          label: 'MP3 (Audio)', value: 'audio',
+          formatId: 'bestaudio', url: null, filesize: null,
+          ext: 'm4a', needsMerge: false, _source: 'generic_audio',
+        },
       ],
     };
   }
@@ -386,19 +434,26 @@ class YtDlpService {
 
   async downloadByUrl(directUrl, outputPath) {
     const cmd = `curl -L --max-time 180 --retry 2 --retry-delay 3 -o "${outputPath}" "${directUrl}"`;
+    console.log(`📥 curl download: ${directUrl.substring(0, 80)}...`);
     await execPromise(cmd, { timeout: 190000 });
   }
 
   async downloadFormat(originalUrl, formatId, outputPath) {
     const cmd = `yt-dlp -f "${formatId}" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${originalUrl}"`;
+    console.log(`📥 yt-dlp format: ${formatId}`);
     await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
   }
 
   // ─── Audio download ────────────────────────────────────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → fs.stat() (cross-platform)
+  // TikTok: audio-only stream yoxdur → video yüklə → ffmpeg extract
+  //
 
   async downloadAudio(url, outputPath, platform) {
-    console.log(`🎵 downloadAudio: platform=${platform}`);
+    console.log(`🎵 downloadAudio: platform=${platform}, url=${url.substring(0, 60)}`);
 
+    // ── TikTok: xüsusi metod ──────────────────────────────────────────────
     if (platform === 'tiktok') {
       return await this.downloadTikTokAudio(url, outputPath);
     }
@@ -411,25 +466,38 @@ class YtDlpService {
     const strategies = [
       {
         name: 'direct_m4a',
-        cmd:  `yt-dlp ${extraArgs} -f "bestaudio[ext=m4a]/bestaudio[ext=aac]" --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`,
+        cmd:  `yt-dlp ${extraArgs} `
+          + `-f "bestaudio[ext=m4a]/bestaudio[ext=aac]" `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'extract_x',
-        cmd:  `yt-dlp ${extraArgs} -f "best" -x --audio-format m4a --audio-quality 0 --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`,
+        cmd:  `yt-dlp ${extraArgs} `
+          + `-f "best" -x --audio-format m4a --audio-quality 0 `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'bestaudio_convert',
-        cmd:  `yt-dlp ${extraArgs} -f "bestaudio" -x --audio-format m4a --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`,
+        cmd:  `yt-dlp ${extraArgs} `
+          + `-f "bestaudio" -x --audio-format m4a `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
       },
     ];
 
     let lastErr = null;
     for (const strategy of strategies) {
       try {
-        console.log(`🎵 Audio strategy: ${strategy.name}`);
+        console.log(`🎵 Audio strategy: ${strategy.name} (${platform})`);
         await execPromise(strategy.cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
         const size = await getFileSize(outputPath);
-        if (size > 0) { console.log(`✅ Audio OK (${strategy.name}): ${size} bytes`); return; }
+        if (size > 0) {
+          console.log(`✅ Audio OK (${strategy.name}): ${size} bytes`);
+          return;
+        }
         throw new Error('Fayl boş gəldi');
       } catch (err) {
         console.log(`⚠️ Audio ${strategy.name} uğursuz: ${err.message.substring(0, 100)}`);
@@ -437,99 +505,110 @@ class YtDlpService {
         await removeFile(outputPath);
       }
     }
+
     throw new Error(`Audio download uğursuz (${platform}): ${lastErr?.message}`);
   }
 
-  // ─── TikTok audio ─────────────────────────────────────────────────────────
+  // ─── TikTok audio: video yüklə → ffmpeg extract ───────────────────────────
+  //
+  // TikTok-da audio-only stream YOXDUR.
+  // Həll: video yüklə, ffmpeg -vn ilə audio extract et.
+  //
 
   async downloadTikTokAudio(url, outputPath) {
+    console.log(`🎵 TikTok audio: video→ffmpeg strategiyası`);
     let lastErr = null;
+
     for (const hostname of this.tiktokHostnames) {
-      const tmpVideo = outputPath.replace('.m4a', '_tmpvideo.mp4');
+      const tmpVideo = outputPath.replace('.m4a', `_tmpvideo.mp4`);
+
       try {
-        const dlCmd = `yt-dlp --extractor-args "tiktok:api_hostname=${hostname}" -f "best[ext=mp4]/best" --no-playlist --retries 2 --socket-timeout 20 -o "${tmpVideo}" "${url}"`;
+        console.log(`🎵 TikTok audio → video yüklə (${hostname})`);
+
+        // 1. Video yüklə
+        const dlCmd = `yt-dlp `
+          + `--extractor-args "tiktok:api_hostname=${hostname}" `
+          + `-f "best[ext=mp4]/best" `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `-o "${tmpVideo}" "${url}"`;
+
         await execPromise(dlCmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
         const videoSize = await getFileSize(tmpVideo);
         if (videoSize === 0) throw new Error('Video fayl boş gəldi');
+        console.log(`✅ TikTok video yükləndi (${hostname}): ${videoSize} bytes`);
+
+        // 2. FFmpeg ilə audio extract
+        console.log(`🎵 FFmpeg audio extract...`);
         const ffCmd = `ffmpeg -i "${tmpVideo}" -vn -acodec aac -ab 192k -y "${outputPath}"`;
         await execPromise(ffCmd, { timeout: 60000 });
+
+        // 3. Temp video sil
         await removeFile(tmpVideo);
+
+        // 4. Audio yoxla
         const audioSize = await getFileSize(outputPath);
         if (audioSize === 0) throw new Error('Audio fayl boş gəldi');
+
         console.log(`✅ TikTok audio OK (${hostname}): ${audioSize} bytes`);
         return;
+
       } catch (err) {
         console.log(`⚠️ TikTok audio ${hostname} uğursuz: ${err.message.substring(0, 120)}`);
         lastErr = err;
-        await removeFile(outputPath.replace('.m4a', '_tmpvideo.mp4'));
+        await removeFile(tmpVideo);
         await removeFile(outputPath);
       }
     }
+
     throw new Error(`TikTok audio bütün hostname-lər uğursuz: ${lastErr?.message}`);
   }
 
-  // ─── YouTube audio server-side (cookie dəstəyi ilə) ──────────────────────
+  // ─── YouTube audio server-side ────────────────────────────────────────────
   //
-  // [YENİ] cookiePath parametri əlavə edildi.
-  // Məntiq:
-  //   1. Cookie varsa — əvvəlcə cookie ilə sadə yükləmə cəhd et (ən etibarlı)
-  //   2. Cookie varsa + bütün strategiyalar
-  //   3. Cookie yoxdursa — köhnə strategiyalar (əvvəlki kimi)
+  // APK-da youtube_explode_dart stream URL 403 verir.
+  // Server-dən yt-dlp ilə audio yüklənir.
   //
 
-  async downloadYoutubeAudio(url, outputPath, cookiePath = null) {
+  async downloadYoutubeAudio(url, outputPath) {
     console.log(`🎵 YouTube audio server-side: ${url.substring(0, 60)}`);
-    console.log(`🍪 Cookie: ${cookiePath ? 'mövcuddur' : 'YOX'}`);
 
-    const ca = this._cookieArg(cookiePath);
-
-    const strategies = [];
-
-    // Cookie varsa — birinci ən sadə yükləmə (cookie + format 140)
-    if (cookiePath) {
-      strategies.push({
-        name: 'cookie_format140',
-        cmd:  `yt-dlp ${ca} -f "140/bestaudio[ext=m4a]/bestaudio[ext=aac]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
-      });
-      strategies.push({
-        name: 'cookie_bestaudio',
-        cmd:  `yt-dlp ${ca} -f "bestaudio" -x --audio-format m4a --audio-quality 0 --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
-      });
-    }
-
-    // Cookie ilə və ya cookie-siz player client strategiyaları
-    strategies.push(
+    const strategies = [
+      {
+        name: 'format_140',
+        cmd:  `yt-dlp -f "140/bestaudio[ext=m4a]/bestaudio[ext=aac]" `
+          + `--no-playlist --retries 3 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
+      },
+      {
+        name: 'extract_x',
+        cmd:  `yt-dlp -f "bestaudio" -x --audio-format m4a --audio-quality 0 `
+          + `--no-playlist --retries 3 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
+      },
       {
         name: 'tv_embedded',
-        cmd:  `yt-dlp ${ca} --extractor-args "youtube:player_client=tv_embedded" -f "140/bestaudio[ext=m4a]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
+        cmd:  `yt-dlp --extractor-args "youtube:player_client=tv_embedded" `
+          + `-f "140/bestaudio[ext=m4a]" `
+          + `--no-playlist --retries 3 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'ios_client',
-        cmd:  `yt-dlp ${ca} --extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)" -f "140/bestaudio[ext=m4a]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
+        cmd:  `yt-dlp --extractor-args "youtube:player_client=ios" `
+          + `--user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)" `
+          + `-f "140/bestaudio[ext=m4a]" `
+          + `--no-playlist --retries 3 --socket-timeout 20 `
+          + `-o "${outputPath}" "${url}"`,
       },
-      {
-        name: 'android_vr',
-        cmd:  `yt-dlp ${ca} --extractor-args "youtube:player_client=android_vr" -f "140/bestaudio[ext=m4a]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
-      },
-      {
-        name: 'web_creator',
-        cmd:  `yt-dlp ${ca} --extractor-args "youtube:player_client=web_creator" -f "140/bestaudio[ext=m4a]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
-      },
-    );
-
-    // Son cəhd: cookie olmadan (məsələn cookie köhnəlibsə)
-    if (cookiePath) {
-      strategies.push({
-        name: 'no_cookie_fallback',
-        cmd:  `yt-dlp -f "140/bestaudio[ext=m4a]/bestaudio[ext=aac]" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${url}"`,
-      });
-    }
+    ];
 
     let lastErr = null;
     for (const strategy of strategies) {
       try {
         console.log(`🎵 YouTube audio strategy: ${strategy.name}`);
         await execPromise(strategy.cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
         const size = await getFileSize(outputPath);
         if (size > 0) {
           console.log(`✅ YouTube audio OK (${strategy.name}): ${size} bytes`);
@@ -546,57 +625,108 @@ class YtDlpService {
     throw new Error(`YouTube audio bütün strategiyalar uğursuz: ${lastErr?.message}`);
   }
 
-  // ─── TikTok video ─────────────────────────────────────────────────────────
+  // ─── TikTok video download — 3 hostname fallback ──────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → getFileSize() (cross-platform)
+  // rm -f → removeFile() (cross-platform)
+  //
 
   async downloadTikTok(url, outputPath) {
     let lastErr = null;
+
     for (const hostname of this.tiktokHostnames) {
       try {
-        const cmd = `yt-dlp --extractor-args "tiktok:api_hostname=${hostname}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --no-playlist --retries 2 --socket-timeout 20 --merge-output-format mp4 -o "${outputPath}" "${url}"`;
+        console.log(`📥 TikTok download hostname: ${hostname}`);
+        const cmd = `yt-dlp `
+          + `--extractor-args "tiktok:api_hostname=${hostname}" `
+          + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `--merge-output-format mp4 `
+          + `-o "${outputPath}" "${url}"`;
+
         await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
         const size = await getFileSize(outputPath);
-        if (size > 0) { console.log(`✅ TikTok OK (${hostname}): ${size} bytes`); return; }
+        if (size > 0) {
+          console.log(`✅ TikTok download OK (${hostname}): ${size} bytes`);
+          return;
+        }
         throw new Error('Fayl boş gəldi');
       } catch (err) {
+        console.log(`⚠️ TikTok hostname ${hostname} uğursuz: ${err.message.substring(0, 120)}`);
         lastErr = err;
         await removeFile(outputPath);
       }
     }
+
+    // Son cəhd — default
     try {
+      console.log('📥 TikTok download: son cəhd (default)');
       const cmd = `yt-dlp -f "best" --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`;
       await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
       const size = await getFileSize(outputPath);
-      if (size > 0) return;
+      if (size > 0) {
+        console.log(`✅ TikTok download OK (default): ${size} bytes`);
+        return;
+      }
       throw new Error('Son cəhd də uğursuz');
-    } catch (err) { lastErr = err; }
+    } catch (err) {
+      lastErr = err;
+    }
+
     throw new Error(`TikTok yükləmə uğursuz: ${lastErr?.message}`);
   }
 
-  // ─── Instagram video ──────────────────────────────────────────────────────
+  // ─── Instagram download — 3 strategy fallback ─────────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → getFileSize(), rm -f → removeFile()
+  //
 
   async downloadInstagram(url, outputPath) {
     let lastErr = null;
+
     for (const strategy of this.instagramStrategies) {
       try {
-        const cmd = `yt-dlp ${strategy.args} -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --no-playlist --retries 2 --socket-timeout 20 --merge-output-format mp4 -o "${outputPath}" "${url}"`;
+        console.log(`📥 Instagram download: ${strategy.name}`);
+        const cmd = `yt-dlp `
+          + `${strategy.args} `
+          + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
+          + `--no-playlist --retries 2 --socket-timeout 20 `
+          + `--merge-output-format mp4 `
+          + `-o "${outputPath}" "${url}"`;
+
         await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
+
         const size = await getFileSize(outputPath);
-        if (size > 0) { console.log(`✅ Instagram OK (${strategy.name}): ${size} bytes`); return; }
+        if (size > 0) {
+          console.log(`✅ Instagram download OK (${strategy.name}): ${size} bytes`);
+          return;
+        }
         throw new Error('Fayl boş gəldi');
       } catch (err) {
+        console.log(`⚠️ Instagram ${strategy.name} uğursuz: ${err.message.substring(0, 120)}`);
         lastErr = err;
         await removeFile(outputPath);
       }
     }
+
     throw new Error(`Instagram yükləmə uğursuz: ${lastErr?.message}`);
   }
 
-  // ─── Generic/Facebook direct ──────────────────────────────────────────────
+  // ─── Generic/Facebook direct download ─────────────────────────────────────
 
   async downloadDirect(originalUrl, outputPath, platform) {
     if (platform === 'tiktok')    return await this.downloadTikTok(originalUrl, outputPath);
     if (platform === 'instagram') return await this.downloadInstagram(originalUrl, outputPath);
-    const cmd = `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --no-playlist --retries 3 --socket-timeout 20 --merge-output-format mp4 -o "${outputPath}" "${originalUrl}"`;
+
+    const cmd = `yt-dlp `
+      + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
+      + `--no-playlist --retries 3 --socket-timeout 20 `
+      + `--merge-output-format mp4 `
+      + `-o "${outputPath}" "${originalUrl}"`;
+
+    console.log(`📥 yt-dlp direct (${platform}): ${originalUrl.substring(0, 60)}`);
     await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
   }
 
@@ -604,6 +734,7 @@ class YtDlpService {
 
   async extractWithArgs(url, args) {
     const cmd = `yt-dlp ${args} --dump-json --no-playlist --socket-timeout 15 "${url}"`;
+    console.log(`📡 yt-dlp extract: ${url.substring(0, 60)}`);
     const { stdout } = await execPromise(cmd, {
       timeout: EXEC_TIMEOUT,
       maxBuffer: 20 * 1024 * 1024,
