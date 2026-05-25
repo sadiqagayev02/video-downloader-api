@@ -3,6 +3,12 @@ const fs = require('fs').promises;
 const util = require('util');
 const execPromise = util.promisify(exec);
 
+// ─── PROXY TƏNZİMLƏMƏLƏRİ ───────────────────────────────────────────────────
+// BURA ÖZ PROXY URL MƏLUMATLARINIZI YAZIN
+// Nümunə: "http://istifadəçi:şifrə@proxy.server:port"
+const PROXY_URL = process.env.PROXY_URL || ""; 
+const PROXY_ARG = PROXY_URL ? `--proxy "${PROXY_URL}"` : "";
+
 const EXEC_TIMEOUT = 20000;
 const DOWNLOAD_TIMEOUT = 200000;
 
@@ -433,13 +439,14 @@ class YtDlpService {
   // ─── Download metodları ────────────────────────────────────────────────────
 
   async downloadByUrl(directUrl, outputPath) {
-    const cmd = `curl -L --max-time 180 --retry 2 --retry-delay 3 -o "${outputPath}" "${directUrl}"`;
+    const proxyCmd = PROXY_URL ? `-x "${PROXY_URL}"` : "";
+    const cmd = `curl -L ${proxyCmd} --max-time 180 --retry 2 --retry-delay 3 -o "${outputPath}" "${directUrl}"`;
     console.log(`📥 curl download: ${directUrl.substring(0, 80)}...`);
     await execPromise(cmd, { timeout: 190000 });
   }
 
   async downloadFormat(originalUrl, formatId, outputPath) {
-    const cmd = `yt-dlp -f "${formatId}" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${originalUrl}"`;
+    const cmd = `yt-dlp ${PROXY_ARG} -f "${formatId}" --no-playlist --retries 3 --socket-timeout 20 -o "${outputPath}" "${originalUrl}"`;
     console.log(`📥 yt-dlp format: ${formatId}`);
     await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
   }
@@ -466,21 +473,21 @@ class YtDlpService {
     const strategies = [
       {
         name: 'direct_m4a',
-        cmd:  `yt-dlp ${extraArgs} `
+        cmd:  `yt-dlp ${PROXY_ARG} ${extraArgs} `
           + `-f "bestaudio[ext=m4a]/bestaudio[ext=aac]" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'extract_x',
-        cmd:  `yt-dlp ${extraArgs} `
+        cmd:  `yt-dlp ${PROXY_ARG} ${extraArgs} `
           + `-f "best" -x --audio-format m4a --audio-quality 0 `
           + `--no-playlist --retries 2 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'bestaudio_convert',
-        cmd:  `yt-dlp ${extraArgs} `
+        cmd:  `yt-dlp ${PROXY_ARG} ${extraArgs} `
           + `-f "bestaudio" -x --audio-format m4a `
           + `--no-playlist --retries 2 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
@@ -526,7 +533,7 @@ class YtDlpService {
         console.log(`🎵 TikTok audio → video yüklə (${hostname})`);
 
         // 1. Video yüklə
-        const dlCmd = `yt-dlp `
+        const dlCmd = `yt-dlp ${PROXY_ARG} `
           + `--extractor-args "tiktok:api_hostname=${hostname}" `
           + `-f "best[ext=mp4]/best" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
@@ -576,26 +583,26 @@ class YtDlpService {
     const strategies = [
       {
         name: 'format_140',
-        cmd:  `yt-dlp -f "140/bestaudio[ext=m4a]/bestaudio[ext=aac]" `
+        cmd:  `yt-dlp ${PROXY_ARG} -f "140/bestaudio[ext=m4a]/bestaudio[ext=aac]" `
           + `--no-playlist --retries 3 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'extract_x',
-        cmd:  `yt-dlp -f "bestaudio" -x --audio-format m4a --audio-quality 0 `
+        cmd:  `yt-dlp ${PROXY_ARG} -f "bestaudio" -x --audio-format m4a --audio-quality 0 `
           + `--no-playlist --retries 3 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'tv_embedded',
-        cmd:  `yt-dlp --extractor-args "youtube:player_client=tv_embedded" `
+        cmd:  `yt-dlp ${PROXY_ARG} --extractor-args "youtube:player_client=tv_embedded" `
           + `-f "140/bestaudio[ext=m4a]" `
           + `--no-playlist --retries 3 --socket-timeout 20 `
           + `-o "${outputPath}" "${url}"`,
       },
       {
         name: 'ios_client',
-        cmd:  `yt-dlp --extractor-args "youtube:player_client=ios" `
+        cmd:  `yt-dlp ${PROXY_ARG} --extractor-args "youtube:player_client=ios" `
           + `--user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)" `
           + `-f "140/bestaudio[ext=m4a]" `
           + `--no-playlist --retries 3 --socket-timeout 20 `
@@ -637,7 +644,7 @@ class YtDlpService {
     for (const hostname of this.tiktokHostnames) {
       try {
         console.log(`📥 TikTok download hostname: ${hostname}`);
-        const cmd = `yt-dlp `
+        const cmd = `yt-dlp ${PROXY_ARG} `
           + `--extractor-args "tiktok:api_hostname=${hostname}" `
           + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
@@ -662,7 +669,7 @@ class YtDlpService {
     // Son cəhd — default
     try {
       console.log('📥 TikTok download: son cəhd (default)');
-      const cmd = `yt-dlp -f "best" --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`;
+      const cmd = `yt-dlp ${PROXY_ARG} -f "best" --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`;
       await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
 
       const size = await getFileSize(outputPath);
@@ -689,7 +696,7 @@ class YtDlpService {
     for (const strategy of this.instagramStrategies) {
       try {
         console.log(`📥 Instagram download: ${strategy.name}`);
-        const cmd = `yt-dlp `
+        const cmd = `yt-dlp ${PROXY_ARG} `
           + `${strategy.args} `
           + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
@@ -720,7 +727,7 @@ class YtDlpService {
     if (platform === 'tiktok')    return await this.downloadTikTok(originalUrl, outputPath);
     if (platform === 'instagram') return await this.downloadInstagram(originalUrl, outputPath);
 
-    const cmd = `yt-dlp `
+    const cmd = `yt-dlp ${PROXY_ARG} `
       + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
       + `--no-playlist --retries 3 --socket-timeout 20 `
       + `--merge-output-format mp4 `
@@ -733,7 +740,7 @@ class YtDlpService {
   // ─── Yardımçılar ───────────────────────────────────────────────────────────
 
   async extractWithArgs(url, args) {
-    const cmd = `yt-dlp ${args} --dump-json --no-playlist --socket-timeout 15 "${url}"`;
+    const cmd = `yt-dlp ${PROXY_ARG} ${args} --dump-json --no-playlist --socket-timeout 15 "${url}"`;
     console.log(`📡 yt-dlp extract: ${url.substring(0, 60)}`);
     const { stdout } = await execPromise(cmd, {
       timeout: EXEC_TIMEOUT,
