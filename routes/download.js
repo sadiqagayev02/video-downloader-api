@@ -3,6 +3,8 @@ const router         = express.Router();
 const fs             = require('fs').promises;
 const path           = require('path');
 const crypto         = require('crypto');
+const https          = require('https');
+const http           = require('http');
 const { exec }       = require('child_process');
 const util           = require('util');
 const execPromise    = util.promisify(exec);
@@ -13,12 +15,100 @@ const cleanupService = require('../services/cleanupService');
 const tmpDir          = process.env.TMP_DIR || '/tmp/video-downloader';
 const REQUEST_TIMEOUT = 120000;
 
-// ─── MP4 → MP3 çevrilmə (FFmpeg) ───────────────────────────────────────────
+// Python servis URL — Render dashboard-da Environment Variable kimi əlavə et:
+// Key: PYTHON_SERVICE_URL  Value: https://sənin-python-servisin.onrender.com
+const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8000';
+
+// ─── MP4 → MP3 çevrilmə (FFmpeg) ─────────────────────────────────────────────
 async function toMp3(inputPath, outputPath) {
   console.log(`🎵 MP4 → MP3 çevrilir: ${path.basename(inputPath)}`);
   await execPromise(`ffmpeg -i "${inputPath}" -vn -acodec libmp3lame -q:a 2 -y "${outputPath}"`);
   console.log(`✅ MP3 çevrildi: ${path.basename(outputPath)}`);
 }
+
+// ─── YouTube Audio Convert (Python FFmpeg) ────────────────────────────────────
+//
+// Flutter-də youtube_explode_dart ilə telefon IP-sindən audio stream URL alınır.
+// Bu URL buraya gəlir, Python-a proxy edilir.
+// Python FFmpeg stream-i MP3-ə çevirib birbaşa cihaza stream edir.
+//
+router.post('/convert', async (req, res) => {
+  const { stream_url, title } = req.body;
+
+  if (!stream_url) {
+    return res.status(400).json({ error: 'stream_url tələb olunur' });
+  }
+
+  const safeTitle = (title || 'audio')
+    .replace(/[^\w\s\u0400-\u04FF\u0600-\u06FF-]/g, '')
+    .replace(/\s+/g, '_')
+    .substring(0, 80) || 'audio';
+
+  console.log(`🎵 Audio convert: ${safeTitle}`);
+
+  try {
+    const pythonUrl  = new URL('/convert', PYTHON_SERVICE_URL);
+    const postData   = JSON.stringify({ stream_url, title: safeTitle });
+    const protocol   = pythonUrl.protocol === 'https:' ? https : http;
+
+    const options = {
+      hostname: pythonUrl.hostname,
+      port:     pythonUrl.port || (pythonUrl.protocol === 'https:' ? 443 : 80),
+      path:     pythonUrl.pathname,
+      method:   'POST',
+      headers:  {
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      timeout: 300000,
+    };
+
+    const pythonReq = protocol.request(options, (pythonRes) => {
+      if (pythonRes.statusCode !== 200) {
+        console.error(`❌ Python xətası: ${pythonRes.statusCode}`);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Python servisi xəta qaytardı' });
+        }
+        return;
+      }
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
+      if (pythonRes.headers['content-length']) {
+        res.setHeader('Content-Length', pythonRes.headers['content-length']);
+      }
+
+      console.log(`📤 MP3 stream: ${safeTitle}.mp3`);
+      pythonRes.pipe(res);
+      pythonRes.on('end', () => console.log(`✅ MP3 stream tamamlandı`));
+    });
+
+    pythonReq.on('error', (err) => {
+      console.error(`❌ Python bağlantı xətası: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(503).json({ error: 'Python servisi əlçatmazdır', retryable: true });
+      }
+    });
+
+    pythonReq.on('timeout', () => {
+      pythonReq.destroy();
+      if (!res.headersSent) {
+        res.status(503).json({ error: 'Python servisi vaxtı keçdi', retryable: true });
+      }
+    });
+
+    req.on('close', () => pythonReq.destroy());
+
+    pythonReq.write(postData);
+    pythonReq.end();
+
+  } catch (err) {
+    console.error('❌ Audio convert xətası:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
 
 // ─── Download başlat ──────────────────────────────────────────────────────────
 router.post('/start', async (req, res) => {
@@ -58,7 +148,6 @@ router.post('/start', async (req, res) => {
 
     const source = selectedQuality._source || '';
 
-    // ── Audio yoxlaması ──────────────────────────────────────────────────────
     const isAudio = quality === 'audio' ||
       selectedQuality.ext === 'm4a' ||
       selectedQuality.ext === 'mp3' ||
@@ -69,7 +158,6 @@ router.post('/start', async (req, res) => {
     let outputPath;
     let ext;
 
-    // ── AUDIO DOWNLOAD ───────────────────────────────────────────────────────
     if (isAudio) {
       ext        = 'm4a';
       outputPath = path.join(tmpDir, `out_${fileId}.m4a`);
@@ -96,7 +184,6 @@ router.post('/start', async (req, res) => {
         await ytdlpService.downloadAudio(url, outputPath, detectedPlatform);
       }
 
-    // ── VIDEO DOWNLOAD ───────────────────────────────────────────────────────
     } else {
       ext        = selectedQuality.ext || 'mp4';
       outputPath = path.join(tmpDir, `out_${fileId}.${ext}`);
@@ -117,50 +204,39 @@ router.post('/start', async (req, res) => {
         console.log(`✅ Merge tamamlandı`);
 
       } else if (source === 'tiktok_direct') {
-        console.log('🎵 TikTok video fallback chain');
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadTikTok(url, outputPath);
-
       } else if (source === 'instagram_direct') {
-        console.log('📸 Instagram video fallback chain');
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadInstagram(url, outputPath);
-
       } else if (source === 'facebook_direct' || source === 'generic_direct') {
-        console.log(`👤 Facebook/Generic direct (${detectedPlatform})`);
         outputPath = path.join(tmpDir, `out_${fileId}.mp4`);
         await ytdlpService.downloadDirect(url, outputPath, detectedPlatform);
-
       } else if (selectedQuality.url) {
-        console.log('📀 CDN URL yükləmə');
         await ytdlpService.downloadByUrl(selectedQuality.url, outputPath);
-
       } else if (selectedQuality.formatId) {
-        console.log(`📀 Format ID yükləmə: ${selectedQuality.formatId}`);
         await ytdlpService.downloadFormat(url, selectedQuality.formatId, outputPath);
-
       } else {
         throw new Error('Yükləmə üçün nə URL nə də formatId tapıldı');
       }
     }
 
-    // ── Fayl yoxlaması ───────────────────────────────────────────────────────
     const stats = await fs.stat(outputPath);
     if (stats.size === 0) throw new Error('Yüklənmiş fayl boşdur');
 
-    // ─── MP3 ÇEVİRMƏ (əgər tələb olunubsa) ───────────────────────────────────
     if (quality === 'mp3' || quality === 'audio') {
       console.log(`🎵 MP3 tələb olundu, MP4 → MP3 çevrilir...`);
       const mp3Path = outputPath.replace(/\.(mp4|m4a)$/, '.mp3');
       await toMp3(outputPath, mp3Path);
-      await fs.unlink(outputPath); // MP4/M4A faylını sil
+      await fs.unlink(outputPath);
       outputPath = mp3Path;
       ext = 'mp3';
       console.log(`✅ MP3 hazırdır: ${path.basename(outputPath)}`);
     }
 
-    const sizeMB    = (stats.size / 1024 / 1024).toFixed(1);
-    const safeTitle = (videoInfo.title || 'video')
+    const finalStats = await fs.stat(outputPath);
+    const sizeMB     = (finalStats.size / 1024 / 1024).toFixed(1);
+    const safeTitle  = (videoInfo.title || 'video')
       .replace(/[^\w\s\u0400-\u04FF\u0600-\u06FF-]/g, '')
       .replace(/\s+/g, '_')
       .substring(0, 80) || 'video';
@@ -174,7 +250,7 @@ router.post('/start', async (req, res) => {
         success:  true,
         fileId,
         filename: `${safeTitle}.${ext}`,
-        filesize: stats.size,
+        filesize: finalStats.size,
       });
     }
 
@@ -196,10 +272,7 @@ router.post('/start', async (req, res) => {
         err.message.includes('timeout') ||
         err.message.includes('network');
 
-      res.status(500).json({
-        error: err.message,
-        retryable: isRetryable,
-      });
+      res.status(500).json({ error: err.message, retryable: isRetryable });
     }
   }
 });
@@ -234,9 +307,7 @@ router.get('/file/:fileId', async (req, res) => {
   console.log(`📤 Göndərilir: ${path.basename(filePath)} (${sizeMB} MB)`);
 
   res.download(filePath, (err) => {
-    if (err && !res.headersSent) {
-      console.error('❌ Göndərmə xətası:', err);
-    }
+    if (err && !res.headersSent) console.error('❌ Göndərmə xətası:', err);
     cleanupService.cleanupFile(filePath);
     console.log(`🧹 Temp fayl silindi: ${path.basename(filePath)}`);
   });
