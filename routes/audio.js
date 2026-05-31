@@ -4,16 +4,11 @@ const router = express.Router();
 const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
-const https = require('https');
-const http = require('http');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
 
 const audioDir = process.env.AUDIO_DIR || '/tmp/audio-downloader';
-
-// Python servis URL
-const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8000';
 
 fs.mkdir(audioDir, { recursive: true }).catch(() => {});
 
@@ -24,13 +19,11 @@ function createTempCookieFile(cookieString, fileId) {
   try {
     const cookieDir = '/tmp/yt-cookies';
     const cookieFile = path.join(cookieDir, `flutter_${fileId}.txt`);
-    
     const lines = [
       '# Netscape HTTP Cookie File',
       '# Generated from Flutter app cookies',
       '',
     ];
-
     cookieString.split(';').forEach(pair => {
       const eqIdx = pair.indexOf('=');
       if (eqIdx === -1) return;
@@ -41,7 +34,6 @@ function createTempCookieFile(cookieString, fileId) {
         `.youtube.com\tTRUE\t/\tFALSE\t${Math.floor(Date.now() / 1000) + 86400 * 14}\t${name}\t${value}`
       );
     });
-
     require('fs').writeFileSync(cookieFile, lines.join('\n'));
     console.log(`🍪 Audio cookie faylı yaradıldı: ${lines.length - 3} cookie`);
     return cookieFile;
@@ -94,11 +86,12 @@ function cleanupDir(dir, fileId) {
   } catch (_) {}
 }
 
-// ─── YouTube Audio → Python FFmpeg → MP3 stream ───────────────────────────
+// ─── YouTube Audio → FFmpeg → MP3 stream ─────────────────────────────────
 //
 // Flutter telefonda youtube_explode_dart ilə audio stream URL alır.
-// URL buraya gəlir, Python-a proxy edilir.
-// Python FFmpeg ilə MP3-ə çevirib birbaşa cihaza stream edir.
+// URL buraya gəlir, FFmpeg birbaşa stream URL-dən oxuyur,
+// MP3-ə çevirib cihaza stream edir.
+// Python servis lazım deyil — Node.js öz FFmpeg-i işlədir.
 //
 router.post('/convert', async (req, res) => {
   const { stream_url, title } = req.body;
@@ -108,76 +101,63 @@ router.post('/convert', async (req, res) => {
   }
 
   const safeTitle = makeSafeTitle(title || 'audio');
-  console.log(`🎵 Audio convert → Python: ${safeTitle}`);
+  console.log(`🎵 FFmpeg convert başladı: ${safeTitle}`);
 
-  try {
-    const pythonUrl = new URL('/convert', PYTHON_SERVICE_URL);
-    const postData  = JSON.stringify({ stream_url, title: safeTitle });
-    const protocol  = pythonUrl.protocol === 'https:' ? https : http;
+  // Response header-ləri göndər
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
 
-    const options = {
-      hostname: pythonUrl.hostname,
-      port:     pythonUrl.port || (pythonUrl.protocol === 'https:' ? 443 : 80),
-      path:     pythonUrl.pathname,
-      method:   'POST',
-      headers:  {
-        'Content-Type':   'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-      timeout: 300000,
-    };
+  // FFmpeg: stream URL-dən oxu → MP3 → stdout
+  const ffmpegProcess = spawn('ffmpeg', [
+    '-reconnect',            '1',
+    '-reconnect_streamed',   '1',
+    '-reconnect_delay_max',  '5',
+    '-i',                    stream_url,
+    '-vn',                             // video yox
+    '-acodec',               'libmp3lame',
+    '-ab',                   '192k',
+    '-f',                    'mp3',
+    'pipe:1',                          // stdout-a yaz
+  ]);
 
-    const pythonReq = protocol.request(options, (pythonRes) => {
-      if (pythonRes.statusCode !== 200) {
-        console.error(`❌ Python xətası: ${pythonRes.statusCode}`);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Python servisi xəta qaytardı' });
-        }
-        return;
-      }
+  // FFmpeg stdout → response stream
+  ffmpegProcess.stdout.pipe(res);
 
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
-      if (pythonRes.headers['content-length']) {
-        res.setHeader('Content-Length', pythonRes.headers['content-length']);
-      }
-
-      console.log(`📤 MP3 stream başladı: ${safeTitle}.mp3`);
-      pythonRes.pipe(res);
-      pythonRes.on('end', () => console.log(`✅ MP3 stream tamamlandı: ${safeTitle}`));
-    });
-
-    pythonReq.on('error', (err) => {
-      console.error(`❌ Python bağlantı xətası: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(503).json({ error: 'Python servisi əlçatmazdır', retryable: true });
-      }
-    });
-
-    pythonReq.on('timeout', () => {
-      pythonReq.destroy();
-      if (!res.headersSent) {
-        res.status(503).json({ error: 'Python servisi vaxtı keçdi', retryable: true });
-      }
-    });
-
-    req.on('close', () => pythonReq.destroy());
-
-    pythonReq.write(postData);
-    pythonReq.end();
-
-  } catch (err) {
-    console.error('❌ Audio convert xətası:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
+  // FFmpeg log (debug üçün)
+  ffmpegProcess.stderr.on('data', (data) => {
+    const line = data.toString();
+    // Yalnız xəta sətrlərini log et
+    if (line.includes('Error') || line.includes('error') || line.includes('failed')) {
+      console.log(`⚠️ FFmpeg: ${line.substring(0, 120)}`);
     }
-  }
+  });
+
+  ffmpegProcess.on('close', (code) => {
+    if (code === 0) {
+      console.log(`✅ FFmpeg tamamlandı: ${safeTitle}`);
+    } else {
+      console.log(`⚠️ FFmpeg kod: ${code} (${safeTitle})`);
+    }
+  });
+
+  ffmpegProcess.on('error', (err) => {
+    console.error(`❌ FFmpeg xətası: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: `FFmpeg xətası: ${err.message}` });
+    }
+  });
+
+  // Client bağlantını kəssə FFmpeg-i də dayandır
+  req.on('close', () => {
+    ffmpegProcess.kill('SIGTERM');
+    console.log(`🛑 FFmpeg dayandırıldı (client disconnected): ${safeTitle}`);
+  });
 });
 
 // ─── Audio yükləməni başlat ───────────────────────────────────────────────
 router.post('/start', async (req, res) => {
   const { url, cookieString } = req.body;
-  
+
   if (!url) {
     return res.status(400).json({ error: 'URL tələb olunur' });
   }
@@ -193,8 +173,10 @@ router.post('/start', async (req, res) => {
   let title = 'audio';
 
   const tempCookieFile = createTempCookieFile(cookieString, fileId);
-  const cookieArg = tempCookieFile ? `--cookies "${tempCookieFile}"` : getStaticCookieArg();
-  
+  const cookieArg = tempCookieFile
+    ? `--cookies "${tempCookieFile}"`
+    : getStaticCookieArg();
+
   console.log(`🍪 Cookie: ${tempCookieFile ? 'Flutter (dinamik)' : (cookieArg ? 'env (statik)' : 'yoxdur')}`);
 
   try {
@@ -205,7 +187,7 @@ router.post('/start', async (req, res) => {
     } catch (_) {}
 
     let downloadCmd;
-    
+
     if (isYoutube) {
       downloadCmd = `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" ${cookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`;
       console.log('🎵 YouTube audio → m4a');
@@ -235,15 +217,15 @@ router.post('/start', async (req, res) => {
 
     const filename = `${makeSafeTitle(title)}.${actualExt}`;
     const sizeStr = formatSize(stats.size);
-    
+
     console.log(`✅ Audio tamamlandı: ${sizeStr} → ${filename}`);
 
     res.json({
-      success: true,
-      fileId: `${fileId}_final`,
+      success:       true,
+      fileId:        `${fileId}_final`,
       filename,
-      filesize: stats.size,
-      sizeFormatted: sizeStr
+      filesize:      stats.size,
+      sizeFormatted: sizeStr,
     });
 
   } catch (err) {
@@ -261,9 +243,9 @@ router.post('/start', async (req, res) => {
 router.get('/file/:fileId', async (req, res) => {
   const { fileId } = req.params;
   const exts = ['m4a', 'mp3', 'aac', 'opus', 'webm'];
-  
+
   let filePath = null;
-  
+
   for (const ext of exts) {
     const testPath = path.join(audioDir, `out_${fileId}.${ext}`);
     try {
@@ -272,13 +254,13 @@ router.get('/file/:fileId', async (req, res) => {
       break;
     } catch (_) {}
   }
-  
+
   if (!filePath) {
     return res.status(404).json({ error: 'Audio fayl tapılmadı' });
   }
-  
+
   console.log(`📤 Audio göndərilir: ${path.basename(filePath)}`);
-  
+
   res.download(filePath, path.basename(filePath), (err) => {
     if (err) console.error('❌ Audio göndərmə xətası:', err);
     setTimeout(() => {
@@ -293,44 +275,44 @@ router.get('/file/:fileId', async (req, res) => {
 // ─── Audio məlumatı al ────────────────────────────────────────────────────
 router.post('/info', async (req, res) => {
   const { url } = req.body;
-  
+
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
-  
+
   try {
     const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 30 "${url}"`;
     const { stdout } = await execPromise(cmd, { timeout: 35000, maxBuffer: 10 * 1024 * 1024 });
     const data = JSON.parse(stdout);
-    
+
     const formats = data.formats || [];
-    const audioFormats = formats.filter(f => 
+    const audioFormats = formats.filter(f =>
       f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec)
     );
-    
+
     const qualities = [];
     if (audioFormats.length > 0) {
       qualities.push({
-        label: 'MP3 (Audio)',
-        value: 'audio',
-        formatId: audioFormats[0].format_id,
-        filesize: audioFormats[0].filesize || null,
-        ext: 'm4a',
+        label:      'MP3 (Audio)',
+        value:      'audio',
+        formatId:   audioFormats[0].format_id,
+        filesize:   audioFormats[0].filesize || null,
+        ext:        'm4a',
         needsMerge: false,
-        _source: 'audio_direct'
+        _source:    'audio_direct',
       });
     }
-    
+
     res.json({
       success: true,
       data: {
-        title: data.title || 'Audio',
+        title:    data.title || 'Audio',
         thumbnail: data.thumbnail || '',
         duration: formatDuration(data.duration || 0),
-        platform: url.includes('youtube.com') ? 'youtube' : 
-                  (url.includes('tiktok.com') ? 'tiktok' : 
+        platform: url.includes('youtube.com') ? 'youtube' :
+                  (url.includes('tiktok.com') ? 'tiktok' :
                    (url.includes('instagram.com') ? 'instagram' : 'other')),
         uploader: data.uploader || data.channel || '',
-        qualities
-      }
+        qualities,
+      },
     });
   } catch (err) {
     console.error('❌ Audio info xətası:', err.message);
