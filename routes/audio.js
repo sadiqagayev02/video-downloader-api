@@ -103,40 +103,29 @@ router.post('/convert', async (req, res) => {
   const safeTitle = makeSafeTitle(title || 'audio');
   console.log(`🎵 FFmpeg convert başladı: ${safeTitle}`);
 
-  // Response header-ləri göndər
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
-
-  // FFmpeg: stream URL-dən oxu → MP3 → stdout
   const ffmpegProcess = spawn('ffmpeg', [
-    '-reconnect',            '1',
-    '-reconnect_streamed',   '1',
-    '-reconnect_delay_max',  '5',
-    '-i',                    stream_url,
-    '-vn',                             // video yox
-    '-acodec',               'libmp3lame',
-    '-ab',                   '192k',
-    '-f',                    'mp3',
-    'pipe:1',                          // stdout-a yaz
+    '-reconnect',           '1',
+    '-reconnect_streamed',  '1',
+    '-reconnect_delay_max', '5',
+    '-i',                   stream_url,
+    '-vn',
+    '-acodec',              'libmp3lame',
+    '-ab',                  '192k',
+    '-f',                   'mp3',
+    'pipe:1',
   ]);
 
-  // FFmpeg stdout → response stream
-  ffmpegProcess.stdout.pipe(res);
+  let headersSent = false;
 
-  // FFmpeg log (debug üçün)
-  ffmpegProcess.stderr.on('data', (data) => {
-    const line = data.toString();
-    // Yalnız xəta sətrlərini log et
-    if (line.includes('Error') || line.includes('error') || line.includes('failed')) {
-      console.log(`⚠️ FFmpeg: ${line.substring(0, 120)}`);
-    }
-  });
-
-  ffmpegProcess.on('close', (code) => {
-    if (code === 0) {
-      console.log(`✅ FFmpeg tamamlandı: ${safeTitle}`);
-    } else {
-      console.log(`⚠️ FFmpeg kod: ${code} (${safeTitle})`);
+  // İlk data gəldikdə header göndər, sonra pipe et
+  ffmpegProcess.stdout.once('data', (chunk) => {
+    if (!headersSent) {
+      headersSent = true;
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
+      res.write(chunk);
+      ffmpegProcess.stdout.pipe(res);
+      console.log(`📤 MP3 stream başladı: ${safeTitle}`);
     }
   });
 
@@ -147,10 +136,23 @@ router.post('/convert', async (req, res) => {
     }
   });
 
-  // Client bağlantını kəssə FFmpeg-i də dayandır
+  ffmpegProcess.stderr.on('data', (data) => {
+    const line = data.toString();
+    if (line.includes('error') || line.includes('Error')) {
+      console.log(`⚠️ FFmpeg: ${line.substring(0, 120)}`);
+    }
+  });
+
+  ffmpegProcess.on('close', (code) => {
+    console.log(`✅ FFmpeg tamamlandı (code ${code}): ${safeTitle}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'FFmpeg heç bir data qaytarmadı' });
+    }
+  });
+
   req.on('close', () => {
     ffmpegProcess.kill('SIGTERM');
-    console.log(`🛑 FFmpeg dayandırıldı (client disconnected): ${safeTitle}`);
+    console.log(`🛑 FFmpeg dayandırıldı: ${safeTitle}`);
   });
 });
 
