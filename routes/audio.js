@@ -101,59 +101,69 @@ router.post('/convert', async (req, res) => {
   }
 
   const safeTitle = makeSafeTitle(title || 'audio');
-  console.log(`🎵 FFmpeg convert başladı: ${safeTitle}`);
+  const fileId    = crypto.randomBytes(8).toString('hex');
+  const outputPath = path.join(audioDir, `conv_${fileId}.mp3`);
 
-  const ffmpegProcess = spawn('ffmpeg', [
-    '-reconnect',           '1',
-    '-reconnect_streamed',  '1',
-    '-reconnect_delay_max', '5',
-    '-i',                   stream_url,
-    '-vn',
-    '-acodec',              'libmp3lame',
-    '-ab',                  '192k',
-    '-f',                   'mp3',
-    'pipe:1',
-  ]);
+  console.log(`🎵 FFmpeg convert: ${safeTitle}`);
 
-  let headersSent = false;
+  try {
+    // FFmpeg: stream URL → MP3 fayla yaz (pipe yox)
+    await new Promise((resolve, reject) => {
+      const ffmpegProcess = spawn('ffmpeg', [
+        '-reconnect',           '1',
+        '-reconnect_streamed',  '1',
+        '-reconnect_delay_max', '5',
+        '-i',                   stream_url,
+        '-vn',
+        '-acodec',              'libmp3lame',
+        '-ab',                  '192k',
+        '-y',
+        outputPath,
+      ]);
 
-  // İlk data gəldikdə header göndər, sonra pipe et
-  ffmpegProcess.stdout.once('data', (chunk) => {
-    if (!headersSent) {
-      headersSent = true;
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
-      res.write(chunk);
-      ffmpegProcess.stdout.pipe(res);
-      console.log(`📤 MP3 stream başladı: ${safeTitle}`);
-    }
-  });
+      let stderrLog = '';
+      ffmpegProcess.stderr.on('data', (data) => {
+        stderrLog += data.toString();
+      });
 
-  ffmpegProcess.on('error', (err) => {
-    console.error(`❌ FFmpeg xətası: ${err.message}`);
+      ffmpegProcess.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ FFmpeg tamamlandı: ${safeTitle}`);
+          resolve();
+        } else {
+          console.error(`❌ FFmpeg kod ${code}: ${stderrLog.slice(-300)}`);
+          reject(new Error(`FFmpeg uğursuz (kod ${code})`));
+        }
+      });
+
+      ffmpegProcess.on('error', (err) => {
+        reject(new Error(`FFmpeg xətası: ${err.message}`));
+      });
+    });
+
+    // Fayl yoxla
+    const stats = require('fs').statSync(outputPath);
+    if (stats.size === 0) throw new Error('MP3 fayl boşdur');
+
+    console.log(`📤 MP3 göndərilir: ${safeTitle} (${formatSize(stats.size)})`);
+
+    // Faylı göndər
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
+    res.setHeader('Content-Length', stats.size);
+
+    res.download(outputPath, `${safeTitle}.mp3`, (err) => {
+      if (err) console.error(`❌ Göndərmə xətası: ${err.message}`);
+      try { require('fs').unlinkSync(outputPath); } catch (_) {}
+    });
+
+  } catch (err) {
+    console.error(`❌ Convert xətası: ${err.message}`);
+    try { require('fs').unlinkSync(outputPath); } catch (_) {}
     if (!res.headersSent) {
-      res.status(500).json({ error: `FFmpeg xətası: ${err.message}` });
+      res.status(500).json({ error: err.message });
     }
-  });
-
-  ffmpegProcess.stderr.on('data', (data) => {
-    const line = data.toString();
-    if (line.includes('error') || line.includes('Error')) {
-      console.log(`⚠️ FFmpeg: ${line.substring(0, 120)}`);
-    }
-  });
-
-  ffmpegProcess.on('close', (code) => {
-    console.log(`✅ FFmpeg tamamlandı (code ${code}): ${safeTitle}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'FFmpeg heç bir data qaytarmadı' });
-    }
-  });
-
-  req.on('close', () => {
-    ffmpegProcess.kill('SIGTERM');
-    console.log(`🛑 FFmpeg dayandırıldı: ${safeTitle}`);
-  });
+  }
 });
 
 // ─── Audio yükləməni başlat ───────────────────────────────────────────────
