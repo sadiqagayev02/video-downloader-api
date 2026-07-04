@@ -14,7 +14,7 @@ RUN apk add --no-cache \
 # Deno (Invidious API üçün)
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
-# yt-dlp quraşdır (SON VERSİYA)
+# yt-dlp quraşdır
 RUN pip3 install -U yt-dlp --break-system-packages
 
 # Versiyaları yoxla
@@ -36,7 +36,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3000/api/health || exit 1
 
-# ═══════════════════════════════════════════════════════════════
-# DƏYİŞİKLİK: Hər startda yt-dlp-ni yenilə (background-da)
-# ═══════════════════════════════════════════════════════════════
-CMD sh -c "yt-dlp -U 2>/dev/null & node index.js"
+CMD ["node", "index.js"]
