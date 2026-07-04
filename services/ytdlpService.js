@@ -1,5 +1,3 @@
-ytdlpService.js   tam yaz
-
 const { exec } = require('child_process');
 const fs = require('fs').promises;
 const util = require('util');
