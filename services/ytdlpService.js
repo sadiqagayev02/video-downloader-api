@@ -1,9 +1,13 @@
+ytdlpService.js   tam yaz
+
 const { exec } = require('child_process');
 const fs = require('fs').promises;
 const util = require('util');
 const execPromise = util.promisify(exec);
 
 // ─── PROXY TƏNZİMLƏMƏLƏRİ ───────────────────────────────────────────────────
+// BURA ÖZ PROXY URL MƏLUMATLARINIZI YAZIN
+// Nümunə: "http://istifadəçi:şifrə@proxy.server:port"
 const PROXY_URL = process.env.PROXY_URL || ""; 
 const PROXY_ARG = PROXY_URL ? `--proxy "${PROXY_URL}"` : "";
 
@@ -31,9 +35,6 @@ async function removeFile(filePath) {
 
 class YtDlpService {
   constructor() {
-    // ═══════════════════════════════════════════════════════════════════════
-    // YOUTUBE STRATEGİYALARI
-    // ═══════════════════════════════════════════════════════════════════════
     this.youtubeStrategies = [
       { name: 'tv_embedded', args: '--extractor-args "youtube:player_client=tv_embedded"' },
       { name: 'ios',         args: '--extractor-args "youtube:player_client=ios" --user-agent "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"' },
@@ -43,83 +44,25 @@ class YtDlpService {
       { name: 'default',     args: '' },
     ];
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TIKTOK HOSTNAME-LƏRİ
-    // ═══════════════════════════════════════════════════════════════════════
     this.tiktokHostnames = [
       'api22-normal-c-useast2a.tiktokv.com',
       'api16-normal-c-useast2a.tiktokv.com',
       'api-normal-c-useast2a.tiktokv.com',
     ];
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // INSTAGRAM STRATEGİYALARI - COOKIE YOXdUR, ÇOXLU USER-AGENT
-    // ═══════════════════════════════════════════════════════════════════════
     this.instagramStrategies = [
-      // iOS Instagram App (ƏN ÇOX İŞLƏYİR)
-      {
-        name: 'ig_ios_latest',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Instagram 330.1.0 (iPhone16,2; iOS 17_5_1; en_US; en; scale=3.00; 1290x2796; 604829200)'
-      },
-      {
-        name: 'ig_ios_16',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Instagram 275.0.0.27.98 (iPhone14,2; iOS 16_0; en_US; en; scale=3.00; 1170x2532; 458227617)'
-      },
-      // Android Instagram App
-      {
-        name: 'ig_android',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Instagram 269.0.0.18.75 (SM-G991B; Android 13; en_US; tr-TR; scale=2.0; 1080x2220; 442025532)'
-      },
-      // Desktop Browser
-      {
-        name: 'ig_chrome',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-      },
-      {
-        name: 'ig_firefox',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0'
-      },
-      // Mobile Browser
-      {
-        name: 'ig_safari_mobile',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
-      },
-      {
-        name: 'ig_chrome_mobile',
-        args: '--extractor-args "instagram:api_timeout=30"',
-        ua: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36'
-      },
-      // High Quality
       {
         name: 'ig_high_quality',
-        args: '--extractor-args "instagram:video_quality=high;api_timeout=30"',
-        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        args: '--extractor-args "instagram:video_quality=high" --add-header "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"',
       },
-      // Default
       {
         name: 'ig_default',
-        args: '--socket-timeout 30',
-        ua: ''
+        args: '--add-header "User-Agent:Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36"',
       },
-    ];
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // GENERIC WEB - VIDEO URL PATTERNS
-    // ═══════════════════════════════════════════════════════════════════════
-    this.videoPatterns = [
-      /https?:\/\/[^\s"'<>]+\.(mp4|webm|mkv)(\?[^\s"'<>]*)?/gi,
-      /https?:\/\/[^\s"'<>]+\.m3u8(\?[^\s"'<>]*)?/gi,
-      /file:\s*["']([^"']+)["']/gi,
-      /source:\s*["']([^"']+)["']/gi,
-      /src=["']([^"']+\.(mp4|webm|m3u8)[^"']*)["']/gi,
-      /data-src=["']([^"']+\.(mp4|webm|m3u8)[^"']*)["']/gi,
-      /content=["']([^"']+\.(mp4|webm|m3u8)[^"']*)["']/gi,
+      {
+        name: 'ig_desktop',
+        args: '--add-header "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"',
+      },
     ];
   }
 
@@ -151,28 +94,12 @@ class YtDlpService {
     return await this.getGenericInfo(url);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // YOUTUBE INFO
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── YouTube Info ──────────────────────────────────────────────────────────
 
   async getYouTubeInfo(url) {
-    // 1. youtubei.js cəhd et (PO Token avtomatik yaradır)
-    try {
-      console.log('📡 YouTube: youtubei.js cəhd edilir...');
-      const result = await this.tryYoutubei(url);
-      if (result && result.qualities?.length > 0) {
-        console.log('✅ YouTube youtubei.js uğurlu');
-        return result;
-      }
-    } catch (err) {
-      console.log(`⚠️ YouTube youtubei.js uğursuz: ${err.message.substring(0, 100)}`);
-    }
-
-    // 2. Invidious fallback
     const inv = await this.tryInvidious(url);
     if (inv) return inv;
 
-    // 3. yt-dlp strategiyaları
     for (const strategy of this.youtubeStrategies) {
       try {
         console.log(`📡 YouTube strategiya: ${strategy.name}`);
@@ -183,90 +110,6 @@ class YtDlpService {
       }
     }
     throw new Error('YouTube: bütün metodlar uğursuz');
-  }
-
-  async tryYoutubei(url) {
-    try {
-      const { Innertube } = require('youtubei.js');
-      const videoId = this.extractYouTubeId(url);
-      if (!videoId) throw new Error('Video ID tapılmadı');
-
-      const client = await Innertube.create({
-        cache: new (require('youtubei.js').Cache.Bundled)(),
-        generate_session_locally: true,
-      });
-
-      const info = await client.getBasicInfo(videoId);
-      
-      if (!info.streaming_data) throw new Error('Streaming data yoxdur');
-
-      const formats = info.streaming_data.formats || [];
-      const adaptiveFormats = info.streaming_data.adaptive_formats || [];
-
-      const qualities = [];
-
-      // Video formatları
-      const videoFormats = adaptiveFormats.filter(f => f.has_video && !f.has_audio);
-      const audioFormats = adaptiveFormats.filter(f => f.has_audio && !f.has_video);
-
-      const bestAudio = audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
-      // 1080p
-      const v1080 = videoFormats.find(f => f.height === 1080);
-      if (v1080 && bestAudio) {
-        qualities.push({
-          label: '1080p HD',
-          value: '1080p',
-          videoFormatId: v1080.itag?.toString(),
-          audioFormatId: bestAudio.itag?.toString(),
-          filesize: (v1080.content_length || 0) + (bestAudio.content_length || 0),
-          ext: 'mp4',
-          needsMerge: true,
-          _source: 'youtubei'
-        });
-      }
-
-      // 720p, 480p, 360p
-      for (const res of [720, 480, 360]) {
-        const video = videoFormats.find(f => f.height === res);
-        if (video && bestAudio) {
-          qualities.push({
-            label: `${res}p`,
-            value: `${res}p`,
-            videoFormatId: video.itag?.toString(),
-            audioFormatId: bestAudio.itag?.toString(),
-            filesize: (video.content_length || 0) + (bestAudio.content_length || 0),
-            ext: 'mp4',
-            needsMerge: true,
-            _source: 'youtubei'
-          });
-        }
-      }
-
-      // Audio
-      if (bestAudio) {
-        qualities.push({
-          label: 'MP3 (Audio)',
-          value: 'audio',
-          formatId: bestAudio.itag?.toString(),
-          filesize: bestAudio.content_length || null,
-          ext: 'm4a',
-          needsMerge: false,
-          _source: 'youtubei'
-        });
-      }
-
-      return {
-        title: info.basic_info.title || 'YouTube Video',
-        thumbnail: info.basic_info.thumbnail?.[0]?.url || '',
-        duration: this.formatDuration(info.basic_info.duration || 0),
-        uploader: info.basic_info.author || '',
-        platform: 'youtube',
-        qualities
-      };
-    } catch (err) {
-      throw new Error(`youtubei.js: ${err.message}`);
-    }
   }
 
   async tryInvidious(url) {
@@ -420,14 +263,11 @@ class YtDlpService {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // TIKTOK INFO
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── TikTok Info ───────────────────────────────────────────────────────────
 
   async getTikTokInfo(url) {
     let lastErr = null;
 
-    // 1. yt-dlp strategiyaları
     for (const hostname of this.tiktokHostnames) {
       try {
         console.log(`📡 TikTok info hostname: ${hostname}`);
@@ -440,7 +280,6 @@ class YtDlpService {
       }
     }
 
-    // 2. Default cəhd
     try {
       console.log('📡 TikTok info: default (son cəhd)');
       const data = await this.extractWithArgs(url, '--socket-timeout 15');
@@ -449,75 +288,7 @@ class YtDlpService {
       lastErr = err;
     }
 
-    // 3. TikWM API fallback (cookie yoxdur!)
-    try {
-      console.log('📡 TikTok fallback: TikWM API');
-      const result = await this.tryTikWM(url);
-      if (result && result.qualities?.length > 0) {
-        console.log('✅ TikTok TikWM uğurlu');
-        return result;
-      }
-    } catch (err) {
-      console.log(`⚠️ TikTok TikWM uğursuz: ${err.message}`);
-      lastErr = err;
-    }
-
     throw new Error(`TikTok məlumat alınmadı: ${lastErr?.message}`);
-  }
-
-  async tryTikWM(url) {
-    try {
-      const formData = new URLSearchParams();
-      formData.append('url', url);
-      formData.append('hd', '1');
-
-      const res = await fetch('https://www.tikwm.com/api/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        body: formData.toString(),
-        signal: AbortSignal.timeout(15000)
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      if (!data.data || !data.data.play) throw new Error('Video URL yoxdur');
-
-      return {
-        title: data.data.title || 'TikTok Video',
-        thumbnail: data.data.cover || '',
-        duration: this.formatDuration(data.data.duration || 0),
-        uploader: data.data.author?.nickname || '',
-        platform: 'tiktok',
-        qualities: [
-          {
-            label: 'HD Video',
-            value: 'video',
-            formatId: null,
-            url: data.data.hdplay || data.data.play,
-            filesize: null,
-            ext: 'mp4',
-            needsMerge: false,
-            _source: 'tikwm'
-          },
-          {
-            label: 'MP3 (Audio)',
-            value: 'audio',
-            formatId: null,
-            url: data.data.music,
-            filesize: null,
-            ext: 'm4a',
-            needsMerge: false,
-            _source: 'tikwm'
-          }
-        ]
-      };
-    } catch (err) {
-      throw new Error(`TikWM: ${err.message}`);
-    }
   }
 
   processTikTokData(data) {
@@ -542,24 +313,15 @@ class YtDlpService {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // INSTAGRAM INFO - COOKIE YOXdUR!
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Instagram Info ────────────────────────────────────────────────────────
 
   async getInstagramInfo(url) {
     let lastErr = null;
 
-    // 1. yt-dlp strategiyaları (çoxlu User-Agent)
     for (const strategy of this.instagramStrategies) {
       try {
         console.log(`📡 Instagram info: ${strategy.name}`);
-        
-        let args = strategy.args;
-        if (strategy.ua) {
-          args += ` --add-header "User-Agent:${strategy.ua}"`;
-        }
-        
-        const data = await this.extractWithArgs(url, args);
+        const data = await this.extractWithArgs(url, strategy.args);
         if (data) return this.processInstagramData(data);
       } catch (err) {
         console.log(`⚠️ Instagram ${strategy.name} uğursuz: ${err.message.substring(0, 120)}`);
@@ -567,125 +329,7 @@ class YtDlpService {
       }
     }
 
-    // 2. 3-cü tərəf API fallback (cookie yoxdur!)
-    console.log('🔄 Instagram: 3-cü tərəf API-lərə keçirəm...');
-
-    const apiFallbacks = [
-      { name: 'SnapSave', fn: () => this.trySnapSave(url) },
-      { name: 'Igram', fn: () => this.tryIgram(url) },
-    ];
-
-    for (const api of apiFallbacks) {
-      try {
-        console.log(`📡 Instagram API: ${api.name}`);
-        const result = await api.fn();
-        if (result && result.qualities?.length > 0) {
-          console.log(`✅ Instagram ${api.name} uğurlu`);
-          return result;
-        }
-      } catch (err) {
-        console.log(`⚠️ Instagram ${api.name} uğursuz: ${err.message}`);
-        lastErr = err;
-      }
-    }
-
     throw new Error(`Instagram məlumat alınmadı: ${lastErr?.message}`);
-  }
-
-  async trySnapSave(url) {
-    try {
-      const formData = new URLSearchParams();
-      formData.append('url', url);
-      formData.append('action', 'post');
-
-      const res = await fetch('https://snapsave.io/action.php', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Referer': 'https://snapsave.io/',
-          'Origin': 'https://snapsave.io'
-        },
-        body: formData.toString(),
-        signal: AbortSignal.timeout(15000)
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const html = await res.text();
-
-      const decodeMatch = html.match(/decode\("([^"]+)"\)/);
-      if (!decodeMatch) throw new Error('Decode tapılmadı');
-
-      const decoded = Buffer.from(decodeMatch[1], 'base64').toString('utf8');
-      const urlMatches = decoded.match(/href="([^"]+\.mp4[^"]*)"/g) || [];
-      
-      if (urlMatches.length === 0) throw new Error('Video URL tapılmadı');
-
-      const videoUrl = urlMatches[0].replace('href="', '').replace('"', '');
-
-      return {
-        title: 'Instagram Video',
-        thumbnail: '',
-        duration: '00:00',
-        uploader: '',
-        platform: 'instagram',
-        qualities: [{
-          label: 'HD Video',
-          value: 'video',
-          formatId: null,
-          url: videoUrl,
-          filesize: null,
-          ext: 'mp4',
-          needsMerge: false,
-          _source: 'snapsave'
-        }]
-      };
-    } catch (err) {
-      throw new Error(`SnapSave: ${err.message}`);
-    }
-  }
-
-  async tryIgram(url) {
-    try {
-      const formData = new URLSearchParams();
-      formData.append('url', url);
-
-      const res = await fetch('https://igram.io/api/instagram/download', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0',
-          'Referer': 'https://igram.io/'
-        },
-        body: formData.toString(),
-        signal: AbortSignal.timeout(15000)
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      if (!data.download_url) throw new Error('Download URL yoxdur');
-
-      return {
-        title: 'Instagram Video',
-        thumbnail: data.thumbnail || '',
-        duration: '00:00',
-        uploader: '',
-        platform: 'instagram',
-        qualities: [{
-          label: 'HD Video',
-          value: 'video',
-          formatId: null,
-          url: data.download_url,
-          filesize: null,
-          ext: 'mp4',
-          needsMerge: false,
-          _source: 'igram'
-        }]
-      };
-    } catch (err) {
-      throw new Error(`Igram: ${err.message}`);
-    }
   }
 
   processInstagramData(data) {
@@ -710,9 +354,7 @@ class YtDlpService {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FACEBOOK INFO
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Facebook Info ─────────────────────────────────────────────────────────
 
   async getFacebookInfo(url) {
     let lastErr = null;
@@ -759,85 +401,14 @@ class YtDlpService {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // GENERIC INFO - HTML EXTRACT + REFERER DƏSTƏYİ
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Generic Info ──────────────────────────────────────────────────────────
 
   async getGenericInfo(url) {
-    // 1. yt-dlp cəhd et
     try {
-      console.log('📡 Generic: yt-dlp cəhd edilir...');
       const data = await this.extractWithArgs(url, '--socket-timeout 15');
       return this.processGenericData(data, url);
     } catch (err) {
-      console.log(`⚠️ Generic yt-dlp uğursuz: ${err.message.substring(0, 100)}`);
-    }
-
-    // 2. HTML-dən video URL çıxart
-    try {
-      console.log('📡 Generic: HTML-dən video URL çıxarılır...');
-      const result = await this.extractVideoFromHtml(url);
-      if (result && result.qualities?.length > 0) {
-        console.log('✅ Generic HTML extract uğurlu');
-        return result;
-      }
-    } catch (err) {
-      console.log(`⚠️ Generic HTML extract uğursuz: ${err.message}`);
-    }
-
-    throw new Error(`Generic: məlumat alınmadı`);
-  }
-
-  async extractVideoFromHtml(url) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-        },
-        signal: AbortSignal.timeout(15000)
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const html = await res.text();
-
-      const foundUrls = new Set();
-
-      for (const pattern of this.videoPatterns) {
-        const matches = html.matchAll(pattern);
-        for (const match of matches) {
-          const foundUrl = match[1] || match[0];
-          if (foundUrl && foundUrl.startsWith('http')) {
-            foundUrls.add(foundUrl);
-          }
-        }
-      }
-
-      if (foundUrls.size === 0) {
-        throw new Error('Video URL tapılmadı');
-      }
-
-      const videoUrl = Array.from(foundUrls)[0];
-      console.log(`✅ HTML-dən video tapıldı: ${videoUrl.substring(0, 80)}`);
-
-      return {
-        title: 'Video',
-        thumbnail: '',
-        duration: '00:00',
-        uploader: '',
-        platform: 'web',
-        qualities: [{
-          label: 'Video',
-          value: 'video',
-          url: videoUrl,
-          filesize: null,
-          ext: videoUrl.includes('.m3u8') ? 'mp4' : 'mp4',
-          needsMerge: false,
-          _source: 'html_extract'
-        }]
-      };
-    } catch (err) {
-      throw new Error(`HTML extract: ${err.message}`);
+      throw new Error(`Məlumat alınmadı: ${err.message}`);
     }
   }
 
@@ -867,9 +438,7 @@ class YtDlpService {
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DOWNLOAD METODLARI
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Download metodları ────────────────────────────────────────────────────
 
   async downloadByUrl(directUrl, outputPath) {
     const proxyCmd = PROXY_URL ? `-x "${PROXY_URL}"` : "";
@@ -885,10 +454,15 @@ class YtDlpService {
   }
 
   // ─── Audio download ────────────────────────────────────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → fs.stat() (cross-platform)
+  // TikTok: audio-only stream yoxdur → video yüklə → ffmpeg extract
+  //
 
   async downloadAudio(url, outputPath, platform) {
     console.log(`🎵 downloadAudio: platform=${platform}, url=${url.substring(0, 60)}`);
 
+    // ── TikTok: xüsusi metod ──────────────────────────────────────────────
     if (platform === 'tiktok') {
       return await this.downloadTikTokAudio(url, outputPath);
     }
@@ -896,15 +470,6 @@ class YtDlpService {
     let extraArgs = '';
     if (platform === 'instagram') {
       extraArgs = '--extractor-args "instagram:video_quality=high"';
-    }
-
-    // Generic audio üçün referer əlavə et
-    if (platform === 'web' || platform === 'other') {
-      try {
-        const urlObj = new URL(url);
-        const referer = `${urlObj.protocol}//${urlObj.host}/`;
-        extraArgs += ` --referer "${referer}"`;
-      } catch {}
     }
 
     const strategies = [
@@ -954,6 +519,10 @@ class YtDlpService {
   }
 
   // ─── TikTok audio: video yüklə → ffmpeg extract ───────────────────────────
+  //
+  // TikTok-da audio-only stream YOXDUR.
+  // Həll: video yüklə, ffmpeg -vn ilə audio extract et.
+  //
 
   async downloadTikTokAudio(url, outputPath) {
     console.log(`🎵 TikTok audio: video→ffmpeg strategiyası`);
@@ -965,6 +534,7 @@ class YtDlpService {
       try {
         console.log(`🎵 TikTok audio → video yüklə (${hostname})`);
 
+        // 1. Video yüklə
         const dlCmd = `yt-dlp ${PROXY_ARG} `
           + `--extractor-args "tiktok:api_hostname=${hostname}" `
           + `-f "best[ext=mp4]/best" `
@@ -977,12 +547,15 @@ class YtDlpService {
         if (videoSize === 0) throw new Error('Video fayl boş gəldi');
         console.log(`✅ TikTok video yükləndi (${hostname}): ${videoSize} bytes`);
 
+        // 2. FFmpeg ilə audio extract
         console.log(`🎵 FFmpeg audio extract...`);
         const ffCmd = `ffmpeg -i "${tmpVideo}" -vn -acodec aac -ab 192k -y "${outputPath}"`;
         await execPromise(ffCmd, { timeout: 60000 });
 
+        // 3. Temp video sil
         await removeFile(tmpVideo);
 
+        // 4. Audio yoxla
         const audioSize = await getFileSize(outputPath);
         if (audioSize === 0) throw new Error('Audio fayl boş gəldi');
 
@@ -1001,6 +574,10 @@ class YtDlpService {
   }
 
   // ─── YouTube audio server-side ────────────────────────────────────────────
+  //
+  // APK-da youtube_explode_dart stream URL 403 verir.
+  // Server-dən yt-dlp ilə audio yüklənir.
+  //
 
   async downloadYoutubeAudio(url, outputPath) {
     console.log(`🎵 YouTube audio server-side: ${url.substring(0, 60)}`);
@@ -1057,7 +634,11 @@ class YtDlpService {
     throw new Error(`YouTube audio bütün strategiyalar uğursuz: ${lastErr?.message}`);
   }
 
-  // ─── TikTok video download ────────────────────────────────────────────────
+  // ─── TikTok video download — 3 hostname fallback ──────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → getFileSize() (cross-platform)
+  // rm -f → removeFile() (cross-platform)
+  //
 
   async downloadTikTok(url, outputPath) {
     let lastErr = null;
@@ -1087,6 +668,7 @@ class YtDlpService {
       }
     }
 
+    // Son cəhd — default
     try {
       console.log('📥 TikTok download: son cəhd (default)');
       const cmd = `yt-dlp ${PROXY_ARG} -f "best" --no-playlist --retries 2 --socket-timeout 20 -o "${outputPath}" "${url}"`;
@@ -1105,9 +687,10 @@ class YtDlpService {
     throw new Error(`TikTok yükləmə uğursuz: ${lastErr?.message}`);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // INSTAGRAM DOWNLOAD - COOKIE YOXdUR!
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ─── Instagram download — 3 strategy fallback ─────────────────────────────
+  //
+  // DƏYİŞİKLİK: stat -c%s → getFileSize(), rm -f → removeFile()
+  //
 
   async downloadInstagram(url, outputPath) {
     let lastErr = null;
@@ -1115,14 +698,8 @@ class YtDlpService {
     for (const strategy of this.instagramStrategies) {
       try {
         console.log(`📥 Instagram download: ${strategy.name}`);
-        
-        let args = strategy.args;
-        if (strategy.ua) {
-          args += ` --add-header "User-Agent:${strategy.ua}"`;
-        }
-        
         const cmd = `yt-dlp ${PROXY_ARG} `
-          + `${args} `
+          + `${strategy.args} `
           + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
           + `--merge-output-format mp4 `
@@ -1152,22 +729,7 @@ class YtDlpService {
     if (platform === 'tiktok')    return await this.downloadTikTok(originalUrl, outputPath);
     if (platform === 'instagram') return await this.downloadInstagram(originalUrl, outputPath);
 
-    // Generic web üçün referer əlavə et
-    let refererArg = '';
-    if (platform === 'web' || platform === 'other') {
-      try {
-        const urlObj = new URL(originalUrl);
-        const referer = `${urlObj.protocol}//${urlObj.host}/`;
-        refererArg = `--referer "${referer}"`;
-      } catch {}
-    }
-
-    // m3u8 stream varsa, ffmpeg ilə yüklə
-    if (originalUrl.includes('.m3u8')) {
-      return await this.downloadM3u8Stream(originalUrl, outputPath);
-    }
-
-    const cmd = `yt-dlp ${PROXY_ARG} ${refererArg} `
+    const cmd = `yt-dlp ${PROXY_ARG} `
       + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
       + `--no-playlist --retries 3 --socket-timeout 20 `
       + `--merge-output-format mp4 `
@@ -1175,20 +737,6 @@ class YtDlpService {
 
     console.log(`📥 yt-dlp direct (${platform}): ${originalUrl.substring(0, 60)}`);
     await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT, maxBuffer: 5 * 1024 * 1024 });
-  }
-
-  // ─── m3u8 stream → MP4 ────────────────────────────────────────────────────
-
-  async downloadM3u8Stream(m3u8Url, outputPath) {
-    console.log(`📥 m3u8 stream yüklənir: ${m3u8Url.substring(0, 80)}`);
-    
-    const cmd = `ffmpeg -i "${m3u8Url}" -c copy -bsf:a aac_adtstoasc -y "${outputPath}"`;
-    await execPromise(cmd, { timeout: DOWNLOAD_TIMEOUT });
-    
-    const size = await getFileSize(outputPath);
-    if (size === 0) throw new Error('m3u8 yükləmə uğursuz');
-    
-    console.log(`✅ m3u8 stream OK: ${size} bytes`);
   }
 
   // ─── Yardımçılar ───────────────────────────────────────────────────────────
