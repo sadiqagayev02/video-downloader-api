@@ -13,8 +13,16 @@ router.post('/', async (req, res) => {
   try {
     // Instagram üçün yeni V3 servis
     if (url.includes('instagram.com') || url.includes('instagr.am')) {
+      console.log('📸 Instagram V3 servis istifadə olunur...');
       const result = await instagramServiceV3.getInfo(url);
       
+      if (!result || !result.qualities || result.qualities.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Format tapılmadı' 
+        });
+      }
+
       return res.json({
         success: true,
         data: {
@@ -51,12 +59,16 @@ router.post('/', async (req, res) => {
     });
   } catch (err) {
     console.error(`❌ /api/info xətası: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Instagram məlumatı alınmadı. Bir az sonra yenidən cəhd edin.',
+      details: err.message 
+    });
   }
 });
 
-// Statistikalar üçün endpoint
-router.get('/stats', (req, res) => {
+// Statistikalar üçün
+router.get('/instagram-stats', (req, res) => {
   res.json({ 
     success: true, 
     stats: instagramServiceV3.getStats() 
