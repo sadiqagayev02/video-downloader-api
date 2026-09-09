@@ -7,7 +7,7 @@ services:
     plan: free
     buildCommand: |
       npm install
-      pip install requests beautifulsoup4
+      pip install -r requirements.txt
     startCommand: node index.js
     healthCheckPath: /api/health
     envVars:
@@ -19,8 +19,6 @@ services:
         value: /tmp/audio-downloader
       - key: YOUTUBE_COOKIE_BASE64
         sync: false
-      - key: PYTHON_PATH
-        value: python3
     disk:
       name: tmp
       mountPath: /tmp
