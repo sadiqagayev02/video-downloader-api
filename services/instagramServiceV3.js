@@ -1,147 +1,125 @@
-// services/instagramServiceV3.js
+// services/instagramServiceV3.js - TAM YENİLƏNMİŞ
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
 const https = require('https');
+const http = require('http');
 
 class InstagramServiceV3 {
   constructor() {
-    this.methodStats = new Map();
-    this.currentMethod = null;
     this.lastSuccessfulMethod = null;
-    
-    this.methods = [
-      'instagram_embed_api',
-      'instagram_web_api',
-      'ytdlp_mobile',
-      'ytdlp_web',
-      'instagram_oembed',
-      'ytdlp_generic',
-    ];
-
-    this.userAgents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
-      'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    ];
+    this.methodStats = new Map();
   }
 
   async getInfo(url) {
+    console.log('📸 Instagram V3 başladı:', url);
+    
     const shortcode = this.extractShortcode(url);
+    console.log('📸 Shortcode:', shortcode);
+    
     if (!shortcode) {
-      throw new Error('Instagram URL düzgün deyil');
+      throw new Error('Instagram URL-dən shortcode tapılmadı');
     }
 
-    console.log(`📸 Instagram: ${shortcode} üçün məlumat alınır...`);
-
-    if (this.lastSuccessfulMethod) {
-      try {
-        console.log(`📸 Keçən uğurlu metod: ${this.lastSuccessfulMethod}`);
-        return await this.tryMethod(this.lastSuccessfulMethod, url, shortcode);
-      } catch (err) {
-        console.log(`⚠️ Keçən metod uğursuz: ${err.message.substring(0, 50)}`);
-      }
-    }
+    // ƏSAS: Bütün metodları yoxla
+    const methods = [
+      { name: 'instagram_web_api_v2', fn: () => this.tryWebAPIv2(shortcode) },
+      { name: 'ytdlp_no_check', fn: () => this.tryYtdlpNoCheck(url) },
+      { name: 'ytdlp_extractor_args', fn: () => this.tryYtdlpExtractorArgs(url) },
+      { name: 'instagram_public_api', fn: () => this.tryPublicAPI(shortcode) },
+      { name: 'ytdlp_embed', fn: () => this.tryYtdlpEmbed(url, shortcode) },
+      { name: 'instagram_embed_page', fn: () => this.tryEmbedPage(shortcode) },
+    ];
 
     let lastError = null;
-    for (const method of this.methods) {
+
+    for (const method of methods) {
       try {
-        console.log(`📸 [${method}] cəhd edilir...`);
-        const result = await this.tryMethod(method, url, shortcode);
+        console.log(`📸 [${method.name}] cəhd edilir...`);
+        const result = await method.fn();
         
         if (result && result.qualities && result.qualities.length > 0) {
-          this.lastSuccessfulMethod = method;
-          this.recordSuccess(method);
-          console.log(`✅ [${method}] UĞURLU!`);
+          this.lastSuccessfulMethod = method.name;
+          this.recordSuccess(method.name);
+          console.log(`✅ [${method.name}] UĞURLU!`);
           return result;
+        } else {
+          console.log(`⚠️ [${method.name}] boş nəticə`);
         }
       } catch (err) {
-        console.log(`❌ [${method}] uğursuz: ${err.message.substring(0, 80)}`);
+        console.log(`❌ [${method.name}] uğursuz: ${err.message.substring(0, 100)}`);
         lastError = err;
-        this.recordFailure(method);
+        this.recordFailure(method.name);
       }
     }
 
     throw new Error(`Instagram bütün metodlar uğursuz: ${lastError?.message}`);
   }
 
-  async tryMethod(method, url, shortcode) {
-    switch (method) {
-      case 'instagram_embed_api':
-        return await this.getViaEmbedAPI(shortcode);
-      
-      case 'instagram_web_api':
-        return await this.getViaWebAPI(shortcode);
-      
-      case 'ytdlp_mobile':
-        return await this.getViaYtdlp(url, 'mobile');
-      
-      case 'ytdlp_web':
-        return await this.getViaYtdlp(url, 'web');
-      
-      case 'instagram_oembed':
-        return await this.getViaOEmbed(url, shortcode);
-      
-      case 'ytdlp_generic':
-        return await this.getViaYtdlp(url, 'generic');
-      
-      default:
-        throw new Error(`Naməlum metod: ${method}`);
-    }
-  }
+  // ─── Metod 1: Web API v2 (fərqli parametrlərlə) ──────────────────────────
+  async tryWebAPIv2(shortcode) {
+    const endpoints = [
+      `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`,
+      `https://www.instagram.com/reel/${shortcode}/?__a=1&__d=dis`,
+      `https://www.instagram.com/tv/${shortcode}/?__a=1&__d=dis`,
+    ];
 
-  async getViaEmbedAPI(shortcode) {
-    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
-    const html = await this.httpGetRaw(embedUrl);
-    
-    // Embed HTML-dən JSON məlumatı çıxar
-    const jsonMatch = html.match(/window\.__additionalDataLoaded\('extra',(.*?)\);<\/script>/);
-    if (!jsonMatch || !jsonMatch[1]) {
-      throw new Error('Embed JSON tapılmadı');
-    }
-
-    const data = JSON.parse(jsonMatch[1]);
-    return this.processEmbedData(data);
-  }
-
-  async getViaWebAPI(shortcode) {
-    const endpoint = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
-    const data = await this.httpGet(endpoint);
-    
-    if (!data || !data.items || data.items.length === 0) {
-      throw new Error('Web API boş cavab');
-    }
-
-    return this.processWebAPIData(data.items[0]);
-  }
-
-  async getViaYtdlp(url, clientType) {
-    const ua = this.getRandomUA(clientType);
-    
-    const strategies = {
-      mobile: [
-        '--extractor-args "instagram:api=web"',
-        '--extractor-args "instagram:prefer_authenticated=false"',
-      ],
-      web: [
-        '--extractor-args "instagram:api=graphql"',
-        '--add-header "x-ig-app-id:936619743392459"',
-      ],
-      generic: [
-        '--no-check-certificates',
-        '--extractor-args "instagram:prefer_embedded=true"',
-      ]
-    };
-
-    const args = strategies[clientType] || strategies.generic;
-
-    for (const extraArg of args) {
+    for (const endpoint of endpoints) {
       try {
-        const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 15 --user-agent "${ua}" ${extraArg} "${url}"`;
+        const data = await this.httpRequest(endpoint);
+        
+        if (data && data.items && data.items.length > 0) {
+          return this.processWebAPIData(data.items[0]);
+        }
+        
+        if (data && data.graphql && data.graphql.shortcode_media) {
+          return this.processGraphQLData(data.graphql.shortcode_media);
+        }
+      } catch (err) {
+        continue;
+      }
+    }
+
+    throw new Error('Web API v2 uğursuz');
+  }
+
+  // ─── Metod 2: yt-dlp certificate yoxlanışı olmadan ──────────────────────
+  async tryYtdlpNoCheck(url) {
+    const cmd = `yt-dlp --dump-json --no-playlist --no-check-certificates --socket-timeout 20 "${url}"`;
+    
+    try {
+      const { stdout } = await execPromise(cmd, { 
+        timeout: 25000,
+        maxBuffer: 30 * 1024 * 1024 
+      });
+      
+      const data = JSON.parse(stdout);
+      if (data && data.formats && data.formats.length > 0) {
+        return this.processYtdlpData(data);
+      }
+    } catch (err) {
+      console.log(`yt-dlp no-check xətası: ${err.message.substring(0, 100)}`);
+    }
+    
+    throw new Error('yt-dlp no-check uğursuz');
+  }
+
+  // ─── Metod 3: yt-dlp fərqli extractor args ilə ──────────────────────────
+  async tryYtdlpExtractorArgs(url) {
+    const strategies = [
+      '--extractor-args "instagram:api=graphql"',
+      '--extractor-args "instagram:prefer_embedded=true"',
+      '--extractor-args "instagram:prefer_authenticated=false"',
+      '--extractor-args "instagram:video_quality=high"',
+      '--extractor-args "instagram:api=web" --add-header "x-ig-app-id:936619743392459"',
+    ];
+
+    for (const args of strategies) {
+      try {
+        const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 15 ${args} "${url}"`;
         const { stdout } = await execPromise(cmd, { 
           timeout: 20000,
-          maxBuffer: 20 * 1024 * 1024 
+          maxBuffer: 30 * 1024 * 1024 
         });
         
         const data = JSON.parse(stdout);
@@ -153,40 +131,153 @@ class InstagramServiceV3 {
       }
     }
 
-    throw new Error('yt-dlp ilə məlumat alınmadı');
+    throw new Error('yt-dlp extractor args uğursuz');
   }
 
-  async getViaOEmbed(url, shortcode) {
-    try {
-      const endpoint = `https://api.instagram.com/oembed/?url=${encodeURIComponent(url)}`;
-      const data = await this.httpGet(endpoint);
-      
-      if (!data || !data.thumbnail_url) {
-        throw new Error('oEmbed məlumatı yoxdur');
+  // ─── Metod 4: Instagram Public API (i.instagram.com) ─────────────────────
+  async tryPublicAPI(shortcode) {
+    const endpoints = [
+      `https://i.instagram.com/api/v1/media/${shortcode}/info/`,
+      `https://www.instagram.com/api/v1/media/${shortcode}/info/`,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const data = await this.httpRequest(endpoint, {
+          'x-ig-app-id': '936619743392459',
+          'x-requested-with': 'XMLHttpRequest',
+        });
+        
+        if (data && data.items && data.items.length > 0) {
+          return this.processPublicAPIData(data.items[0]);
+        }
+      } catch (err) {
+        continue;
       }
-
-      // oEmbed uğurlu oldusa, embed API-yə yönləndir
-      return await this.getViaEmbedAPI(shortcode);
-    } catch (err) {
-      throw new Error('oEmbed uğursuz');
     }
+
+    throw new Error('Public API uğursuz');
   }
 
-  httpGet(url) {
+  // ─── Metod 5: yt-dlp embed URL ilə ───────────────────────────────────────
+  async tryYtdlpEmbed(url, shortcode) {
+    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+    
+    try {
+      const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 20 "${embedUrl}"`;
+      const { stdout } = await execPromise(cmd, { 
+        timeout: 25000,
+        maxBuffer: 30 * 1024 * 1024 
+      });
+      
+      const data = JSON.parse(stdout);
+      if (data && data.formats && data.formats.length > 0) {
+        return this.processYtdlpData(data);
+      }
+    } catch (err) {
+      console.log(`Embed yt-dlp xətası: ${err.message.substring(0, 100)}`);
+    }
+
+    throw new Error('Embed yt-dlp uğursuz');
+  }
+
+  // ─── Metod 6: Embed səhifəsini birbaşa analiz et ────────────────────────
+  async tryEmbedPage(shortcode) {
+    const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
+    
     return new Promise((resolve, reject) => {
-      const ua = this.getRandomUA('web');
+      const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      
       const options = {
+        hostname: 'www.instagram.com',
+        path: `/p/${shortcode}/embed/captioned/`,
+        method: 'GET',
         headers: {
           'User-Agent': ua,
-          'Accept': 'application/json',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache',
-        }
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+        },
+        timeout: 20000,
       };
 
-      https.get(url, options, (res) => {
+      const req = https.request(options, (res) => {
+        let html = '';
+        
+        res.on('data', (chunk) => {
+          html += chunk;
+        });
+        
+        res.on('end', () => {
+          try {
+            // Bütün JSON nümunələrini yoxla
+            const patterns = [
+              /window\.__additionalDataLoaded\('extra',(.*?)\);<\/script>/,
+              /window\._sharedData = (.*?);<\/script>/,
+              /<script type="text\/javascript">window\._sharedData = (.*?);<\/script>/,
+              /"shortcode_media":(.*?)\}\}/,
+              /"video_url":"(.*?)"/,
+              /"display_url":"(.*?)"/,
+            ];
+
+            for (const pattern of patterns) {
+              const match = html.match(pattern);
+              if (match && match[1]) {
+                const result = this.parseEmbedContent(match[1], match[0]);
+                if (result) {
+                  resolve(result);
+                  return;
+                }
+              }
+            }
+
+            reject(new Error('Embed səhifəsində media tapılmadı'));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Timeout'));
+      });
+
+      req.end();
+    });
+  }
+
+  // ─── HTTP Request ────────────────────────────────────────────────────────
+  httpRequest(url, extraHeaders = {}) {
+    return new Promise((resolve, reject) => {
+      const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      
+      const urlObj = new URL(url);
+      const options = {
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: 'GET',
+        headers: {
+          'User-Agent': ua,
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive',
+          ...extraHeaders,
+        },
+        timeout: 15000,
+      };
+
+      const req = https.request(options, (res) => {
         let data = '';
-        res.on('data', chunk => data += chunk);
+        
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        
         res.on('end', () => {
           try {
             resolve(JSON.parse(data));
@@ -194,122 +285,56 @@ class InstagramServiceV3 {
             reject(new Error('JSON parse xətası'));
           }
         });
-      }).on('error', reject);
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Timeout'));
+      });
+
+      req.end();
     });
   }
 
-  httpGetRaw(url) {
-    return new Promise((resolve, reject) => {
-      const ua = this.getRandomUA('web');
-      const options = {
-        headers: {
-          'User-Agent': ua,
-          'Accept': 'text/html',
-          'Accept-Language': 'en-US,en;q=0.9',
-        }
-      };
-
-      https.get(url, options, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => resolve(data));
-      }).on('error', reject);
-    });
-  }
-
-  processWebAPIData(item) {
-    const qualities = [];
+  // ─── Embed məzmun analizi ────────────────────────────────────────────────
+  parseEmbedContent(content, fullMatch) {
+    try {
+      // JSON obyektini çıxar
+      const jsonStr = content.trim();
+      if (jsonStr.startsWith('{') || jsonStr.startsWith('[')) {
+        const data = JSON.parse(jsonStr);
+        return this.processEmbedData(data);
+      }
+      
+      // Video URL birbaşa
+      if (content.startsWith('http') && content.includes('video')) {
+        return {
+          title: 'Instagram Video',
+          thumbnail: '',
+          duration: '00:00',
+          uploader: '',
+          platform: 'instagram',
+          qualities: [{
+            label: 'HD Video',
+            value: 'video',
+            formatId: 'direct',
+            url: content.replace(/\\\//g, '/'),
+            filesize: null,
+            ext: 'mp4',
+            needsMerge: false,
+            _source: 'embed_direct'
+          }]
+        };
+      }
+    } catch (err) {
+      console.log('Parse xətası:', err.message);
+    }
     
-    if (item.video_versions) {
-      const seenHeights = new Set();
-      for (const video of item.video_versions) {
-        const height = video.height || 0;
-        if (!seenHeights.has(height) && height > 0) {
-          seenHeights.add(height);
-          qualities.push({
-            label: `${height}p`,
-            value: `${height}p`,
-            formatId: `web_${height}`,
-            url: video.url,
-            filesize: null,
-            ext: 'mp4',
-            needsMerge: false,
-            _source: 'instagram_web_api'
-          });
-        }
-      }
-    }
-
-    if (item.video_versions && item.video_versions.length > 0) {
-      qualities.push({
-        label: 'MP3 (Audio)',
-        value: 'audio',
-        formatId: 'audio',
-        url: item.video_versions[0].url,
-        filesize: null,
-        ext: 'm4a',
-        needsMerge: false,
-        _source: 'instagram_web_api'
-      });
-    }
-
-    return {
-      title: item.caption?.text?.substring(0, 100) || 'Instagram Video',
-      thumbnail: item.image_versions2?.candidates?.[0]?.url || '',
-      duration: this.formatDuration(item.video_duration || 0),
-      uploader: item.user?.username || '',
-      platform: 'instagram',
-      qualities
-    };
+    return null;
   }
 
-  processEmbedData(data) {
-    const qualities = [];
-    const media = data?.shortcode_media || data?.media || data;
-
-    if (media.video_versions) {
-      const seenHeights = new Set();
-      for (const video of media.video_versions) {
-        const height = video.height || 0;
-        if (!seenHeights.has(height) && height > 0) {
-          seenHeights.add(height);
-          qualities.push({
-            label: `${height}p`,
-            value: `${height}p`,
-            formatId: `embed_${height}`,
-            url: video.url,
-            filesize: null,
-            ext: 'mp4',
-            needsMerge: false,
-            _source: 'instagram_embed'
-          });
-        }
-      }
-    }
-
-    if (media.video_versions && media.video_versions.length > 0) {
-      qualities.push({
-        label: 'MP3 (Audio)',
-        value: 'audio',
-        formatId: 'audio',
-        url: media.video_versions[0].url,
-        filesize: null,
-        ext: 'm4a',
-        needsMerge: false,
-        _source: 'instagram_embed'
-      });
-    }
-
-    return {
-      title: media.caption?.text?.substring(0, 100) || 'Instagram Video',
-      thumbnail: media.image_versions2?.candidates?.[0]?.url || '',
-      duration: this.formatDuration(media.video_duration || 0),
-      uploader: media.user?.username || '',
-      platform: 'instagram',
-      qualities
-    };
-  }
-
+  // ─── Data emalı ──────────────────────────────────────────────────────────
   processYtdlpData(data) {
     const qualities = [];
     
@@ -361,6 +386,84 @@ class InstagramServiceV3 {
     };
   }
 
+  processWebAPIData(item) {
+    return this.processMediaItem(item, 'web_api');
+  }
+
+  processPublicAPIData(item) {
+    return this.processMediaItem(item, 'public_api');
+  }
+
+  processGraphQLData(media) {
+    return this.processMediaItem(media, 'graphql');
+  }
+
+  processEmbedData(data) {
+    const media = data?.shortcode_media || data?.media || data?.graphql?.shortcode_media || data;
+    return this.processMediaItem(media, 'embed');
+  }
+
+  processMediaItem(media, source) {
+    const qualities = [];
+    
+    if (media && media.video_versions) {
+      const seenHeights = new Set();
+      for (const video of media.video_versions) {
+        const height = video.height || 0;
+        if (!seenHeights.has(height) && height > 0) {
+          seenHeights.add(height);
+          qualities.push({
+            label: `${height}p`,
+            value: `${height}p`,
+            formatId: `${source}_${height}`,
+            url: video.url,
+            filesize: null,
+            ext: 'mp4',
+            needsMerge: false,
+            _source: source
+          });
+        }
+      }
+
+      if (media.video_versions.length > 0) {
+        qualities.push({
+          label: 'MP3 (Audio)',
+          value: 'audio',
+          formatId: 'audio',
+          url: media.video_versions[0].url,
+          filesize: null,
+          ext: 'm4a',
+          needsMerge: false,
+          _source: source
+        });
+      }
+    }
+
+    // Şəkil üçün
+    if (media && media.image_versions2?.candidates?.length > 0) {
+      qualities.push({
+        label: 'Şəkil (Original)',
+        value: 'image',
+        formatId: 'image',
+        url: media.image_versions2.candidates[0].url,
+        filesize: null,
+        ext: 'jpg',
+        needsMerge: false,
+        _source: source
+      });
+    }
+
+    return {
+      title: media?.caption?.text?.substring(0, 100) || 'Instagram Media',
+      thumbnail: media?.image_versions2?.candidates?.[0]?.url || '',
+      duration: this.formatDuration(media?.video_duration || 0),
+      uploader: media?.user?.username || media?.owner?.username || '',
+      platform: 'instagram',
+      qualities
+    };
+  }
+
+  // ─── Köməkçi funksiyalar ─────────────────────────────────────────────────
   extractShortcode(url) {
     try {
       const urlObj = new URL(url);
@@ -384,22 +487,10 @@ class InstagramServiceV3 {
     }
   }
 
-  getRandomUA(type = 'web') {
-    if (type === 'mobile') {
-      const mobileUAs = this.userAgents.filter(ua => 
-        ua.includes('iPhone') || ua.includes('Android')
-      );
-      return mobileUAs[Math.floor(Math.random() * mobileUAs.length)];
-    }
-    return this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
-  }
-
   formatDuration(seconds) {
     if (!seconds) return '00:00';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
+    const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
-    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
