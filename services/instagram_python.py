@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # Instagram video məlumatını çıxaran skript
+# Standart kitabxanalarla (requests olmadan)
 
 import sys
 import json
 import re
-import requests
+import urllib.request
+import urllib.error
 
 def extract_shortcode(url):
     """URL-dən shortcode çıxar"""
@@ -25,17 +27,15 @@ def get_embed_page(shortcode):
         'User-Agent': 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
     }
     
-    response = requests.get(embed_url, headers=headers, timeout=20)
-    response.raise_for_status()
-    return response.text
+    req = urllib.request.Request(embed_url, headers=headers)
+    response = urllib.request.urlopen(req, timeout=20)
+    html = response.read().decode('utf-8')
+    return html
 
 def extract_video_url(html):
     """HTML-dən video URL çıxar"""
-    # Bütün mümkün nümunələri yoxla
     patterns = [
         r'https://[^"\'\s]+\.mp4[^"\'\s]*',
         r'https://instagram\.f[^"\'\s]+\.mp4[^"\'\s]*',
@@ -48,7 +48,6 @@ def extract_video_url(html):
         match = re.search(pattern, html)
         if match:
             url = match.group(1) if match.lastindex else match.group(0)
-            # Escape olunmuş simvolları düzəlt
             url = url.replace('\\/', '/')
             url = url.replace('\\u0026', '&')
             return url
@@ -75,12 +74,10 @@ def extract_thumbnail(html):
 
 def extract_title(html):
     """HTML-dən başlıq çıxar"""
-    # Meta tag-dan
     match = re.search(r'<meta[^>]*name="description"[^>]*content="([^"]+)"', html)
     if match:
         return match.group(1)[:100]
     
-    # JSON-dan
     match = re.search(r'"caption":\s*"([^"]+)"', html)
     if match:
         return match.group(1)[:100]
@@ -88,24 +85,19 @@ def extract_title(html):
     return 'Instagram Video'
 
 def get_media_info(url):
-    """Əsas funksiya - video məlumatını qaytar"""
+    """Əsas funksiya"""
     try:
         shortcode = extract_shortcode(url)
         if not shortcode:
             return {'error': 'Shortcode tapılmadı'}
         
-        # Embed səhifəsini yüklə
         html = get_embed_page(shortcode)
         
-        # Video URL çıxar
         video_url = extract_video_url(html)
         if not video_url:
             return {'error': 'Video URL tapılmadı'}
         
-        # Thumbnail çıxar
         thumbnail = extract_thumbnail(html)
-        
-        # Başlıq çıxar
         title = extract_title(html)
         
         return {
@@ -145,7 +137,6 @@ def get_media_info(url):
         return {'error': str(e)}
 
 if __name__ == '__main__':
-    # Command line-dan URL qəbul et
     if len(sys.argv) > 1:
         url = sys.argv[1]
         result = get_media_info(url)
