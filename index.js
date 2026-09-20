@@ -23,16 +23,33 @@ fs.mkdirSync(tmpDir, { recursive: true });
 fs.mkdirSync(audioDir, { recursive: true });
 fs.mkdirSync(cookieDir, { recursive: true });
 
-// Statik cookie (environment variable)
+// ─── YouTube statik cookie ──────────────────────────────────────────────────
 const COOKIE_PATH = path.join(cookieDir, 'youtube.txt');
 if (process.env.YOUTUBE_COOKIE_BASE64) {
   try {
     const content = Buffer.from(process.env.YOUTUBE_COOKIE_BASE64, 'base64').toString('utf8');
     fs.writeFileSync(COOKIE_PATH, content);
-    console.log('✅ Statik cookie yaradıldı (env)');
+    console.log('✅ YouTube cookie yaradıldı (env)');
   } catch (e) {
-    console.log('⚠️ Statik cookie xətası:', e.message);
+    console.log('⚠️ YouTube cookie xətası:', e.message);
   }
+}
+
+// ─── Instagram statik cookie (YENİ) ─────────────────────────────────────────
+const INSTAGRAM_COOKIE_PATH = path.join(cookieDir, 'instagram.txt');
+if (process.env.INSTAGRAM_COOKIE_BASE64) {
+  try {
+    const content = Buffer.from(process.env.INSTAGRAM_COOKIE_BASE64, 'base64').toString('utf8');
+    fs.writeFileSync(INSTAGRAM_COOKIE_PATH, content);
+    console.log('✅ Instagram cookie yaradıldı (env)');
+    console.log(`   Fayl: ${INSTAGRAM_COOKIE_PATH}`);
+    console.log(`   Ölçü: ${content.length} simvol`);
+    console.log(`   Sətirlər: ${content.split('\n').length}`);
+  } catch (e) {
+    console.log('⚠️ Instagram cookie xətası:', e.message);
+  }
+} else {
+  console.log('⚠️ INSTAGRAM_COOKIE_BASE64 env variable tapılmadı!');
 }
 
 // Global yardımçı funksiyalar
@@ -40,6 +57,26 @@ global.getStaticCookieArg = () => {
   try {
     fs.accessSync(COOKIE_PATH);
     return `--cookies "${COOKIE_PATH}"`;
+  } catch {
+    return '';
+  }
+};
+
+// YENİ: Instagram cookie arg
+global.getInstagramCookieArg = () => {
+  try {
+    fs.accessSync(INSTAGRAM_COOKIE_PATH);
+    return `--cookies "${INSTAGRAM_COOKIE_PATH}"`;
+  } catch {
+    return '';
+  }
+};
+
+// YENİ: Instagram cookie path (Python üçün)
+global.getInstagramCookiePath = () => {
+  try {
+    fs.accessSync(INSTAGRAM_COOKIE_PATH);
+    return INSTAGRAM_COOKIE_PATH;
   } catch {
     return '';
   }
@@ -68,14 +105,18 @@ app.use('/api/audio', audioRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    instagram_cookie: fs.existsSync(INSTAGRAM_COOKIE_PATH) ? 'loaded' : 'missing',
+  });
 });
 
 // Root
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'Video Downloader API işləyir!',
-    version: '2.0.0',
+    version: '2.1.0',
     features: ['YouTube', 'TikTok', 'Instagram', 'Web', 'MP3']
   });
 });
