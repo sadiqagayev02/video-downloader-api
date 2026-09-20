@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-Instagram media extractor - 2025 format
-4 strategiya ilə işləyir:
-  1. GraphQL API (embed saytının daxili API-si)
-  2. JSON-LD (structured data)
-  3. HTML embed regex (yeni format)
-  4. oEmbed fallback
+Instagram media extractor — cookie + yt-dlp fallback
 """
 
 import sys
@@ -15,6 +10,8 @@ import gzip
 import html as html_module
 import urllib.request
 import urllib.parse
+import subprocess
+import os
 
 
 # ─── Konfiqurasiya ───────────────────────────────────────────────────────────
@@ -25,20 +22,14 @@ DESKTOP_UA = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
-MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-    "Version/17.5 Mobile/15E148 Safari/604.1"
-)
+INSTAGRAM_COOKIE_PATH = '/tmp/yt-cookies/instagram.txt'
 
 
 # ─── Yardımçı funksiyalar ────────────────────────────────────────────────────
 
 def extract_shortcode(url):
-    """URL-dən shortcode çıxar"""
     patterns = [
         r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)',
-        r'instagram\.com/([A-Za-z0-9_-]+)',
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -48,7 +39,6 @@ def extract_shortcode(url):
 
 
 def http_get(url, headers=None, timeout=20):
-    """Sadə HTTP GET — gzip dəstəyi ilə"""
     if headers is None:
         headers = {}
     req = urllib.request.Request(url, headers=headers)
@@ -60,7 +50,6 @@ def http_get(url, headers=None, timeout=20):
 
 
 def unescape_json_url(url):
-    """JSON escape-lərini təmizlə"""
     if not url:
         return url
     url = url.replace('\\/', '/')
@@ -73,30 +62,128 @@ def unescape_json_url(url):
 
 
 def decode_html_entities(text):
-    """HTML entity-ləri decode et"""
     if not text:
         return text
     return html_module.unescape(text)
 
 
-# ─── Strategiya 1: GraphQL API (embed saytının daxili API-si) ────────────────
+# ─── STRATEGİYA 1: yt-dlp + cookie (ƏSAS, ƏN ETİBARLI) ──────────────────────
 
-def try_graphql_api(shortcode):
+def try_ytdlp_with_cookie(url):
     """
-    Instagram embed səhifəsi GraphQL sorğusu ilə media məlumatı qaytarır.
-    Bu, 2024-cü ildən sonra əsas üsuldur.
+    yt-dlp ilə Instagram məlumatı al.
+    Cookie varsa istifadə et.
     """
     try:
-        api_url = f'https://www.instagram.com/api/v1/media/{shortcode}/info/'
+        cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--socket-timeout', '20']
+
+        # Cookie faylı varsa əlavə et
+        if os.path.exists(INSTAGRAM_COOKIE_PATH):
+            cmd.extend(['--cookies', INSTAGRAM_COOKIE_PATH])
+            print(f'DEBUG ytdlp: cookie istifadə olunur', file=sys.stderr)
+        else:
+            print(f'DEBUG ytdlp: cookie YOXDUR', file=sys.stderr)
+
+        # User-Agent əlavə et
+        cmd.extend(['--user-agent', DESKTOP_UA])
+        cmd.append(url)
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=45
+        )
+
+        if result.returncode != 0:
+            print(f'DEBUG ytdlp stderr: {result.stderr[:300]}', file=sys.stderr)
+            return None
+
+        data = json.loads(result.stdout)
+        return data
+
+    except Exception as e:
+        print(f'DEBUG ytdlp xəta: {e}', file=sys.stderr)
+        return None
+
+
+def process_ytdlp_data(data):
+    """yt-dlp JSON-ndan bizim formatda media məlumatı çıxar"""
+    video_url = None
+    audio_url = None
+
+    # Formatları yoxla
+    formats = data.get('formats', [])
+
+    # Ən yaxşı video (həm video, həm audio)
+    combined = [
+        f for f in formats
+        if f.get('vcodec') != 'none' and f.get('acodec') != 'none'
+    ]
+    if combined:
+        best = sorted(combined, key=lambda x: x.get('height', 0) or 0, reverse=True)[0]
+        video_url = best.get('url')
+
+    # Heç nə tapılmasa, birbaşa `url` sahəsini yoxla
+    if not video_url:
+        video_url = data.get('url') or data.get('webpage_url')
+
+    # Audio — video varsa, eyni URL-dən ffmpeg ilə çıxarılır
+    if video_url:
+        audio_url = video_url
+
+    if not video_url:
+        return None
+
+    # Başlıq
+    title = data.get('title') or data.get('description', '')[:80] or 'Instagram Video'
+    thumbnail = data.get('thumbnail', '')
+    uploader = data.get('uploader') or data.get('channel', '')
+
+    return {
+        'title': title[:100],
+        'thumbnail': thumbnail,
+        'uploader': uploader,
+        'video_url': video_url,
+        'audio_url': audio_url,
+    }
+
+
+# ─── STRATEGİYA 2: GraphQL API (cookie ilə) ─────────────────────────────────
+
+def try_graphql_with_cookie(shortcode):
+    """Cookie ilə GraphQL sorğusu"""
+    try:
+        if not os.path.exists(INSTAGRAM_COOKIE_PATH):
+            return None
+
+        # Cookie faylını oxu
+        cookies = {}
+        with open(INSTAGRAM_COOKIE_PATH, 'r') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) >= 7:
+                    cookies[parts[5]] = parts[6]
+
+        if 'sessionid' not in cookies:
+            return None
+
+        cookie_header = '; '.join([f'{k}={v}' for k, v in cookies.items()])
+
+        api_url = f'https://i.instagram.com/api/v1/media/{shortcode}/info/'
         headers = {
-            'User-Agent': DESKTOP_UA,
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': (
+                'Instagram 219.0.0.12.117 Android '
+                '(30/11; 420dpi; 1080x2340; samsung; SM-G991B; o1s; exynos2100; en_US; 304940619)'
+            ),
+            'Cookie': cookie_header,
             'X-IG-App-ID': '936619743392459',
-            'Referer': f'https://www.instagram.com/p/{shortcode}/',
-            'Origin': 'https://www.instagram.com',
+            'Accept': '*/*',
         }
-        raw = http_get(api_url, headers)
+
+        raw = http_get(api_url, headers, timeout=15)
         data = json.loads(raw)
 
         items = data.get('items') or []
@@ -104,176 +191,35 @@ def try_graphql_api(shortcode):
             return None
 
         item = items[0]
-        return _process_media_item(item, shortcode)
+        video_versions = item.get('video_versions') or []
+
+        if not video_versions:
+            return None
+
+        video_url = video_versions[0].get('url')
+
+        caption = item.get('caption') or {}
+        title = caption.get('text', '')[:100] if isinstance(caption, dict) else 'Instagram Video'
+        uploader = (item.get('user') or {}).get('username', '')
+
+        image_versions = item.get('image_versions2') or {}
+        candidates = image_versions.get('candidates') or []
+        thumbnail = candidates[0].get('url', '') if candidates else ''
+
+        return {
+            'title': title or 'Instagram Video',
+            'thumbnail': thumbnail,
+            'uploader': uploader,
+            'video_url': video_url,
+            'audio_url': video_url,
+        }
 
     except Exception as e:
         print(f'DEBUG GraphQL: {e}', file=sys.stderr)
         return None
 
 
-def _process_media_item(item, shortcode):
-    """GraphQL item-dən media məlumatı çıxar"""
-    result = {
-        'shortcode': shortcode,
-        'title': 'Instagram Video',
-        'thumbnail': '',
-        'uploader': '',
-        'video_url': None,
-        'audio_url': None,
-    }
-
-    # Caption
-    caption = item.get('caption') or {}
-    if isinstance(caption, dict):
-        result['title'] = (caption.get('text') or '')[:100] or result['title']
-    elif isinstance(caption, str):
-        result['title'] = caption[:100] or result['title']
-
-    # Uploader
-    user = item.get('user') or {}
-    result['uploader'] = user.get('username', '')
-
-    # Media növü
-    media_type = item.get('media_type')  # 1=photo, 2=video, 8=carousel
-    video_versions = item.get('video_versions') or []
-
-    # Carousel — ilk videonu götür
-    if media_type == 8:
-        carousel = item.get('carousel_media') or []
-        for c in carousel:
-            if c.get('video_versions'):
-                video_versions = c['video_versions']
-                item = c
-                break
-
-    # Video URL — ən yüksək keyfiyyət
-    if video_versions:
-        best = video_versions[0]  # Instagram ilkini ən yüksək verir
-        result['video_url'] = best.get('url')
-
-    # Thumbnail
-    image_versions = item.get('image_versions2') or {}
-    candidates = image_versions.get('candidates') or []
-    if candidates:
-        result['thumbnail'] = candidates[0].get('url', '')
-
-    # Audio — video varsa, eyni URL-dən ffmpeg ilə çıxarılır
-    if result['video_url']:
-        result['audio_url'] = result['video_url']
-
-    return result
-
-
-# ─── Strategiya 2: JSON-LD ────────────────────────────────────────────────────
-
-def try_json_ld(html):
-    """HTML-də <script type="application/ld+json"> axtar"""
-    try:
-        patterns = [
-            r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
-            r'<script[^>]*type=\'application/ld\+json\'[^>]*>(.*?)</script>',
-        ]
-        for pattern in patterns:
-            for match in re.finditer(pattern, html, re.DOTALL):
-                try:
-                    data = json.loads(match.group(1).strip())
-                    url = _extract_from_json_ld(data)
-                    if url:
-                        return url
-                except json.JSONDecodeError:
-                    continue
-    except Exception as e:
-        print(f'DEBUG JSON-LD: {e}', file=sys.stderr)
-    return None
-
-
-def _extract_from_json_ld(data):
-    """JSON-LD strukturundan video URL çıxar"""
-    if isinstance(data, list):
-        for item in data:
-            res = _extract_from_json_ld(item)
-            if res:
-                return res
-        return None
-
-    if not isinstance(data, dict):
-        return None
-
-    # video → contentUrl
-    if data.get('@type') in ('VideoObject', 'Video'):
-        url = data.get('contentUrl') or data.get('embedUrl')
-        if url:
-            return url
-
-    # Rekursiv axtarış
-    for value in data.values():
-        if isinstance(value, (dict, list)):
-            res = _extract_from_json_ld(value)
-            if res:
-                return res
-
-    return None
-
-
-# ─── Strategiya 3: HTML embed regex (yeni format) ────────────────────────────
-
-def try_html_regex(html):
-    """HTML-dən video URL çıxar — genişləndirilmiş pattern-lər"""
-    patterns = [
-        # JSON escaped formatlar (2024+)
-        r'"video_versions":\s*\[\s*\{[^}]*?"url":\s*"([^"]+)"',
-        r'"video_url":\s*"([^"]+)"',
-        r'"contentUrl":\s*"([^"]+)"',
-        r'"playable_url":\s*"([^"]+)"',
-        r'"playable_url_quality_hd":\s*"([^"]+)"',
-        # CDN URL formatları
-        r'"(https:\\/\\/instagram[^"]*?\.mp4[^"]*?)"',
-        r'"(https:\\/\\/[^"]*?\.mp4[^"]*?)"',
-        # HTML attribute-lar
-        r'<meta[^>]*property="og:video"[^>]*content="([^"]+)"',
-        r'<meta[^>]*property="og:video:secure_url"[^>]*content="([^"]+)"',
-        r'<video[^>]*src="([^"]+)"',
-        r'<source[^>]*src="([^"]+)"',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, html)
-        if match:
-            url = unescape_json_url(match.group(1))
-            if url and ('http' in url):
-                return url
-
-    return None
-
-
-# ─── Strategiya 4: oEmbed fallback ────────────────────────────────────────────
-
-def try_oembed(shortcode):
-    """Rəsmi oEmbed API — thumbnail üçün"""
-    try:
-        embed_url = f'https://www.instagram.com/p/{shortcode}/'
-        api_url = (
-            'https://api.instagram.com/oembed/?url='
-            + urllib.parse.quote(embed_url, safe='')
-        )
-        headers = {'User-Agent': DESKTOP_UA}
-        raw = http_get(api_url, headers, timeout=10)
-        data = json.loads(raw)
-
-        return {
-            'shortcode': shortcode,
-            'title': (data.get('title') or 'Instagram Video')[:100],
-            'thumbnail': data.get('thumbnail_url', ''),
-            'uploader': data.get('author_name', ''),
-            'video_url': None,
-            'audio_url': None,
-        }
-    except Exception as e:
-        print(f'DEBUG oEmbed: {e}', file=sys.stderr)
-        return None
-
-
-# ─── Əsas funksiya ────────────────────────────────────────────────────────────
+# ─── ƏSAS FUNKSİYA ────────────────────────────────────────────────────────────
 
 def get_media_info(url):
     try:
@@ -283,26 +229,26 @@ def get_media_info(url):
 
         print(f'DEBUG: Shortcode = {shortcode}', file=sys.stderr)
 
-        # Media nəticələrini yığ
-        media = {
-            'shortcode': shortcode,
-            'title': 'Instagram Video',
-            'thumbnail': '',
-            'uploader': '',
-            'video_url': None,
-            'audio_url': None,
-        }
+        media = None
 
-        # ─── Strategiya 1: GraphQL (ən etibarlı) ────────────────────────────
-        print('DEBUG: [1/4] GraphQL API...', file=sys.stderr)
-        gql_result = try_graphql_api(shortcode)
-        if gql_result and gql_result.get('video_url'):
-            print('DEBUG: ✅ GraphQL uğurlu', file=sys.stderr)
-            media.update(gql_result)
-        else:
-            print('DEBUG: ❌ GraphQL uğursuz', file=sys.stderr)
+        # ─── 1: yt-dlp + cookie (ƏSAS) ──────────────────────────────────────
+        print('DEBUG: [1/3] yt-dlp + cookie...', file=sys.stderr)
+        ytdlp_data = try_ytdlp_with_cookie(url)
+        if ytdlp_data:
+            media = process_ytdlp_data(ytdlp_data)
+            if media:
+                print('DEBUG: ✅ yt-dlp uğurlu', file=sys.stderr)
 
-            # ─── Strategiya 2-4: HTML əsaslı ─────────────────────────────
+        # ─── 2: GraphQL + cookie ────────────────────────────────────────────
+        if not media:
+            print('DEBUG: [2/3] GraphQL + cookie...', file=sys.stderr)
+            media = try_graphql_with_cookie(shortcode)
+            if media:
+                print('DEBUG: ✅ GraphQL uğurlu', file=sys.stderr)
+
+        # ─── 3: Embed HTML (son şans) ───────────────────────────────────────
+        if not media:
+            print('DEBUG: [3/3] Embed HTML...', file=sys.stderr)
             try:
                 embed_url = f'https://www.instagram.com/p/{shortcode}/embed/captioned/'
                 headers = {
@@ -311,69 +257,68 @@ def get_media_info(url):
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept-Encoding': 'gzip, deflate',
                 }
+
+                # Cookie faylını header-ə əlavə et
+                if os.path.exists(INSTAGRAM_COOKIE_PATH):
+                    cookies = {}
+                    with open(INSTAGRAM_COOKIE_PATH, 'r') as f:
+                        for line in f:
+                            if line.startswith('#') or not line.strip():
+                                continue
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 7:
+                                cookies[parts[5]] = parts[6]
+                    if cookies:
+                        headers['Cookie'] = '; '.join([f'{k}={v}' for k, v in cookies.items()])
+
                 html = http_get(embed_url, headers)
-                print(f'DEBUG: HTML uzunluğu = {len(html)}', file=sys.stderr)
 
-                print('DEBUG: [2/4] JSON-LD...', file=sys.stderr)
-                video_url = try_json_ld(html)
-
-                if not video_url:
-                    print('DEBUG: [3/4] HTML regex...', file=sys.stderr)
-                    video_url = try_html_regex(html)
+                # Video URL axtar
+                video_url = None
+                patterns = [
+                    r'"video_versions":\s*\[\s*\{[^}]*?"url":\s*"([^"]+)"',
+                    r'"video_url":\s*"([^"]+)"',
+                    r'"(https:\\/\\/[^"]*?\.mp4[^"]*?)"',
+                ]
+                for pattern in patterns:
+                    m = re.search(pattern, html)
+                    if m:
+                        video_url = unescape_json_url(m.group(1))
+                        if video_url:
+                            break
 
                 if video_url:
-                    media['video_url'] = video_url
-                    media['audio_url'] = video_url
-                    print('DEBUG: ✅ HTML-dən tapıldı', file=sys.stderr)
+                    thumb_match = re.search(r'"display_url":\s*"([^"]+)"', html)
+                    thumbnail = unescape_json_url(thumb_match.group(1)) if thumb_match else ''
 
-                # Thumbnail + title
-                thumb_match = re.search(
-                    r'"display_url":\s*"([^"]+)"', html
-                ) or re.search(
-                    r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html
-                )
-                if thumb_match:
-                    media['thumbnail'] = unescape_json_url(thumb_match.group(1))
+                    title_match = re.search(r'"caption":\s*"([^"]+)"', html)
+                    title = decode_html_entities(title_match.group(1))[:100] if title_match else 'Instagram Video'
 
-                title_match = re.search(
-                    r'<meta[^>]*property="og:title"[^>]*content="([^"]+)"', html
-                ) or re.search(
-                    r'<meta[^>]*name="description"[^>]*content="([^"]+)"', html
-                )
-                if title_match:
-                    media['title'] = decode_html_entities(title_match.group(1))[:100]
+                    media = {
+                        'title': title,
+                        'thumbnail': thumbnail,
+                        'uploader': '',
+                        'video_url': video_url,
+                        'audio_url': video_url,
+                    }
+                    print('DEBUG: ✅ Embed HTML uğurlu', file=sys.stderr)
 
             except Exception as e:
-                print(f'DEBUG HTML: {e}', file=sys.stderr)
-
-        # ─── Strategiya 4: oEmbed (yalnız thumbnail üçün) ────────────────────
-        if not media.get('thumbnail') or not media.get('uploader'):
-            print('DEBUG: [4/4] oEmbed...', file=sys.stderr)
-            oembed = try_oembed(shortcode)
-            if oembed:
-                if not media.get('thumbnail') and oembed.get('thumbnail'):
-                    media['thumbnail'] = oembed['thumbnail']
-                if not media.get('uploader') and oembed.get('uploader'):
-                    media['uploader'] = oembed['uploader']
-                if not media.get('title') and oembed.get('title'):
-                    media['title'] = oembed['title']
+                print(f'DEBUG Embed: {e}', file=sys.stderr)
 
         # ─── Nəticə ─────────────────────────────────────────────────────────
-        video_url = media.get('video_url')
-
-        if not video_url:
+        if not media or not media.get('video_url'):
             print('DEBUG: ❌ BÜTÜN STRATEGİYALAR UĞURSUZ', file=sys.stderr)
             return {'error': 'Video URL tapılmadı — bütün strategiyalar uğursuz'}
 
         print(f'DEBUG: ✅ Video URL tapıldı', file=sys.stderr)
 
-        # Flutter gözləyir: qualities[]
         qualities = [
             {
                 'label': 'HD Video',
                 'value': 'video',
                 'formatId': 'direct',
-                'url': video_url,
+                'url': media['video_url'],
                 'filesize': None,
                 'ext': 'mp4',
                 'needsMerge': False,
@@ -383,7 +328,7 @@ def get_media_info(url):
                 'label': 'MP3 (Audio)',
                 'value': 'audio',
                 'formatId': 'audio',
-                'url': video_url,   # Flutter ffmpeg ilə çevirəcək (və ya server)
+                'url': media['audio_url'] or media['video_url'],
                 'filesize': None,
                 'ext': 'm4a',
                 'needsMerge': False,
