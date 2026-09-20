@@ -693,10 +693,21 @@ class YtDlpService {
   async downloadInstagram(url, outputPath) {
     let lastErr = null;
 
+    // YENİ: Instagram cookie əlavə et
+    const igCookieArg = global.getInstagramCookieArg
+      ? global.getInstagramCookieArg()
+      : '';
+
+    if (igCookieArg) {
+      console.log(`🍪 Instagram cookie istifadə olunur`);
+    } else {
+      console.log(`⚠️ Instagram cookie YOXDUR — uğur şansı aşağıdır`);
+    }
+
     for (const strategy of this.instagramStrategies) {
       try {
         console.log(`📥 Instagram download: ${strategy.name}`);
-        const cmd = `yt-dlp ${PROXY_ARG} `
+        const cmd = `yt-dlp ${PROXY_ARG} ${igCookieArg} `
           + `${strategy.args} `
           + `-f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" `
           + `--no-playlist --retries 2 --socket-timeout 20 `
