@@ -1,45 +1,24 @@
-// routes/audio.js — TAM YENİ VERSİYA (ikili sistem)
+// routes/audio.js
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
-const fsp = require('fs').promises;
+const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { exec, spawn } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const audioDir = process.env.AUDIO_DIR || '/tmp/audio-downloader';
-fs.mkdirSync(audioDir, { recursive: true });
-fs.mkdirSync('/tmp/yt-cookies', { recursive: true });
 
-// ─── Köməkçi funksiyalar ──────────────────────────────────────────────────
-function formatSize(bytes) {
-  if (bytes <= 0) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
-  return `${(bytes / 1073741824).toFixed(2)} GB`;
-}
-
-function makeSafeTitle(title) {
-  return (title || 'audio')
-    .replace(/[^\w\s\u0400-\u04FF\u0100-\u024F-]/g, '')
-    .replace(/\s+/g, '_')
-    .substring(0, 80) || 'audio';
-}
-
-function detectPlatform(url) {
-  if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('instagram.com')) return 'instagram';
-  if (url.includes('tiktok.com')) return 'tiktok';
-  return 'other';
-}
+fs.mkdir(audioDir, { recursive: true }).catch(() => {});
 
 function createTempCookieFile(cookieString, fileId) {
   if (!cookieString || typeof cookieString !== 'string' || !cookieString.trim()) {
     return null;
   }
   try {
-    const cookieFile = path.join('/tmp/yt-cookies', `flutter_${fileId}.txt`);
+    const cookieDir = '/tmp/yt-cookies';
+    const cookieFile = path.join(cookieDir, `flutter_${fileId}.txt`);
     const lines = [
       '# Netscape HTTP Cookie File',
       '# Generated from Flutter app cookies',
@@ -55,11 +34,11 @@ function createTempCookieFile(cookieString, fileId) {
         `.youtube.com\tTRUE\t/\tFALSE\t${Math.floor(Date.now() / 1000) + 86400 * 14}\t${name}\t${value}`
       );
     });
-    fs.writeFileSync(cookieFile, lines.join('\n'));
-    console.log(`🍪 Cookie faylı yaradıldı: ${lines.length - 3} cookie`);
+    require('fs').writeFileSync(cookieFile, lines.join('\n'));
+    console.log(`🍪 Audio cookie faylı yaradıldı: ${lines.length - 3} cookie`);
     return cookieFile;
   } catch (e) {
-    console.log('⚠️ Cookie fayl xətası:', e.message);
+    console.log('⚠️ Audio cookie fayl xətası:', e.message);
     return null;
   }
 }
@@ -67,339 +46,288 @@ function createTempCookieFile(cookieString, fileId) {
 function getStaticCookieArg() {
   const cookiePath = '/tmp/yt-cookies/youtube.txt';
   try {
-    fs.accessSync(cookiePath);
-    return cookiePath;
+    require('fs').accessSync(cookiePath);
+    return `--cookies "${cookiePath}"`;
   } catch {
-    return null;
+    return '';
   }
 }
 
-// ─── YT-DLP-i spawn ilə işlət (progress üçün) ────────────────────────────
-function runYtDlp(args, onProgress) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', args);
-    let stderr = '';
-    let stdout = '';
-
-    proc.stdout.on('data', (d) => {
-      const text = d.toString();
-      stdout += text;
-      if (onProgress) {
-        const match = text.match(/(\d+\.?\d*)%/);
-        if (match) onProgress(parseFloat(match[1]));
-      }
-    });
-
-    proc.stderr.on('data', (d) => {
-      const text = d.toString();
-      stderr += text;
-      if (onProgress) {
-        const match = text.match(/(\d+\.?\d*)%/);
-        if (match) onProgress(parseFloat(match[1]));
-      }
-    });
-
-    proc.on('close', (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`yt-dlp kod ${code}: ${stderr.slice(-500)}`));
-    });
-
-    proc.on('error', (err) => reject(new Error(`yt-dlp tapılmadı: ${err.message}`)));
-  });
+function formatSize(bytes) {
+  if (bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+  return `${(bytes / 1073741824).toFixed(2)} GB`;
 }
 
-// ─── FFmpeg ilə stream → MP3 ──────────────────────────────────────────────
-function runFfmpegConvert(streamUrl, outputPath, onProgress) {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-reconnect',           '1',
-      '-reconnect_streamed',  '1',
-      '-reconnect_delay_max', '5',
-      '-reconnect_at_eof',    '1',
-      '-rw_timeout',          '15000000',
-      '-i',                   streamUrl,
-      '-vn',
-      '-acodec',              'libmp3lame',
-      '-ab',                  '192k',
-      '-y',
-      '-progress',            'pipe:1',    // ← progress stdout-a
-      outputPath,
-    ]);
-
-    let stderr = '';
-    let duration = 0;
-
-    ffmpeg.stderr.on('data', (d) => {
-      const text = d.toString();
-      stderr += text;
-      // Duration tap
-      const durMatch = text.match(/Duration: (\d+):(\d+):(\d+)/);
-      if (durMatch) {
-        duration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseInt(durMatch[3]);
-      }
-    });
-
-    ffmpeg.stdout.on('data', (d) => {
-      const text = d.toString();
-      // out_time_ms=12345678
-      const timeMatch = text.match(/out_time_ms=(\d+)/);
-      if (timeMatch && duration > 0 && onProgress) {
-        const secs = parseInt(timeMatch[1]) / 1000000;
-        const pct = Math.min(100, (secs / duration) * 100);
-        onProgress(pct);
-      }
-    });
-
-    ffmpeg.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg kod ${code}: ${stderr.slice(-500)}`));
-    });
-
-    ffmpeg.on('error', reject);
-  });
+function makeSafeTitle(title) {
+  return (title || 'audio')
+    .replace(/[^\w\s\u0400-\u04FF\u0100-\u024F-]/g, '')
+    .replace(/\s+/g, '_')
+    .substring(0, 80) || 'audio';
 }
 
-// ─── ƏSAS ROUTE: /convert ────────────────────────────────────────────────
-// Flutter göndərir:
-//   - YouTube: { url, stream_url, title }  → FFmpeg ilə convert
-//   - Instagram/TikTok: { url, cookieString, title } → yt-dlp ilə download
+function findFile(dir, fileId) {
+  try {
+    const files = require('fs').readdirSync(dir).filter(f => f.startsWith(`out_${fileId}`));
+    if (files.length > 0) return path.join(dir, files[0]);
+  } catch (_) {}
+  return null;
+}
+
+function cleanupDir(dir, fileId) {
+  try {
+    require('fs').readdirSync(dir)
+      .filter(f => f.includes(fileId))
+      .forEach(f => {
+        try { require('fs').unlinkSync(path.join(dir, f)); } catch (_) {}
+      });
+  } catch (_) {}
+}
+
+// ─── YouTube Audio → FFmpeg → MP3 stream ─────────────────────────────────
+//
+// Flutter telefonda youtube_explode_dart ilə audio stream URL alır.
+// URL buraya gəlir, FFmpeg birbaşa stream URL-dən oxuyur,
+// MP3-ə çevirib cihaza stream edir.
+// Python servis lazım deyil — Node.js öz FFmpeg-i işlədir.
 //
 router.post('/convert', async (req, res) => {
-  const { url, stream_url, title, cookieString } = req.body;
+  const { stream_url, title } = req.body;
 
-  if (!url && !stream_url) {
-    return res.status(400).json({ error: 'url və ya stream_url tələb olunur' });
+  if (!stream_url) {
+    return res.status(400).json({ error: 'stream_url tələb olunur' });
   }
 
-  const actualUrl = url || '';
-  const platform  = detectPlatform(actualUrl);
   const safeTitle = makeSafeTitle(title || 'audio');
   const fileId    = crypto.randomBytes(8).toString('hex');
+  const outputPath = path.join(audioDir, `conv_${fileId}.mp3`);
 
-  console.log(`🎵 [${platform}] Convert başladı: ${safeTitle}`);
+  console.log(`🎵 FFmpeg convert: ${safeTitle}`);
 
   try {
-    // ── YOUTUBE: stream_url varsa FFmpeg ilə ──
-    if (platform === 'youtube' && stream_url) {
-      const outputPath = path.join(audioDir, `conv_${fileId}.mp3`);
+    // FFmpeg: stream URL → MP3 fayla yaz (pipe yox)
+    await new Promise((resolve, reject) => {
+      const ffmpegProcess = spawn('ffmpeg', [
+        '-reconnect',           '1',
+        '-reconnect_streamed',  '1',
+        '-reconnect_delay_max', '5',
+        '-i',                   stream_url,
+        '-vn',
+        '-acodec',              'libmp3lame',
+        '-ab',                  '192k',
+        '-y',
+        outputPath,
+      ]);
 
-      await runFfmpegConvert(stream_url, outputPath, (pct) => {
-        console.log(`   📊 FFmpeg: ${pct.toFixed(1)}%`);
+      let stderrLog = '';
+      ffmpegProcess.stderr.on('data', (data) => {
+        stderrLog += data.toString();
       });
 
-      const stats = fs.statSync(outputPath);
-      if (stats.size === 0) throw new Error('MP3 fayl boşdur');
-
-      console.log(`✅ [YouTube] MP3 hazır: ${formatSize(stats.size)}`);
-
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
-      res.setHeader('Content-Length', stats.size);
-
-      return res.download(outputPath, `${safeTitle}.mp3`, (err) => {
-        if (err) console.error(`❌ Göndərmə: ${err.message}`);
-        try { fs.unlinkSync(outputPath); } catch (_) {}
+      ffmpegProcess.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ FFmpeg tamamlandı: ${safeTitle}`);
+          resolve();
+        } else {
+          console.error(`❌ FFmpeg kod ${code}: ${stderrLog.slice(-300)}`);
+          reject(new Error(`FFmpeg uğursuz (kod ${code})`));
+        }
       });
-    }
 
-    // ── INSTAGRAM / TIKTOK / DIGƏR: yt-dlp ilə ──
-    if (!actualUrl) {
-      return res.status(400).json({ error: 'Bu platforma üçün url tələb olunur' });
-    }
-
-    const tempCookieFile = createTempCookieFile(cookieString, fileId);
-    const staticCookie   = getStaticCookieArg();
-    const cookiePath     = tempCookieFile || staticCookie;
-
-    console.log(`🍪 Cookie: ${tempCookieFile ? 'Flutter' : (staticCookie ? 'env' : 'yoxdur')}`);
-
-    // Başlıq al
-    let actualTitle = title || 'audio';
-    try {
-      const titleArgs = ['--get-title', '--no-playlist'];
-      if (cookiePath) titleArgs.push('--cookies', cookiePath);
-      titleArgs.push(actualUrl);
-      const out = await runYtDlp(titleArgs);
-      if (out.trim()) actualTitle = out.trim();
-    } catch (_) {}
-
-    const safeActualTitle = makeSafeTitle(actualTitle);
-    const outputTemplate = path.join(audioDir, `out_${fileId}.%(ext)s`);
-
-    // Platform-spesifik args
-    const dlArgs = [
-      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best',
-      '--no-playlist',
-      '--retries', '3',
-      '--fragment-retries', '3',
-      '--socket-timeout', '30',
-      '-o', outputTemplate,
-    ];
-
-    if (cookiePath) dlArgs.push('--cookies', cookiePath);
-
-    // TikTok xüsusi
-    if (platform === 'tiktok') {
-      dlArgs.push('--extractor-args', 'tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com');
-    }
-
-    // Instagram xüsusi
-    if (platform === 'instagram') {
-      dlArgs.push('--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    }
-
-    dlArgs.push(actualUrl);
-
-    console.log(`⬇️ [${platform}] yt-dlp yükləyir...`);
-    await runYtDlp(dlArgs, (pct) => {
-      console.log(`   📊 yt-dlp: ${pct.toFixed(1)}%`);
+      ffmpegProcess.on('error', (err) => {
+        reject(new Error(`FFmpeg xətası: ${err.message}`));
+      });
     });
 
-    // Faylı tap
-    const files = fs.readdirSync(audioDir).filter(f => f.startsWith(`out_${fileId}`));
-    if (files.length === 0) throw new Error('Audio fayl tapılmadı');
+    // Fayl yoxla
+    const stats = require('fs').statSync(outputPath);
+    if (stats.size === 0) throw new Error('MP3 fayl boşdur');
 
-    const actualPath = path.join(audioDir, files[0]);
-    const stats = fs.statSync(actualPath);
-    if (stats.size === 0) throw new Error('Audio fayl boşdur');
+    console.log(`📤 MP3 göndərilir: ${safeTitle} (${formatSize(stats.size)})`);
 
-    const ext = path.extname(actualPath).slice(1) || 'm4a';
-    const filename = `${safeActualTitle}.${ext}`;
-
-    console.log(`✅ [${platform}] Hazır: ${formatSize(stats.size)} → ${filename}`);
-
-    res.setHeader('Content-Type', ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    // Faylı göndər
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.mp3"`);
     res.setHeader('Content-Length', stats.size);
 
-    return res.download(actualPath, filename, (err) => {
-      if (err) console.error(`❌ Göndərmə: ${err.message}`);
-      try { fs.unlinkSync(actualPath); } catch (_) {}
-      if (tempCookieFile) {
-        try { fs.unlinkSync(tempCookieFile); } catch (_) {}
-      }
+    res.download(outputPath, `${safeTitle}.mp3`, (err) => {
+      if (err) console.error(`❌ Göndərmə xətası: ${err.message}`);
+      try { require('fs').unlinkSync(outputPath); } catch (_) {}
     });
 
   } catch (err) {
     console.error(`❌ Convert xətası: ${err.message}`);
+    try { require('fs').unlinkSync(outputPath); } catch (_) {}
     if (!res.headersSent) {
-      res.status(500).json({ success: false, error: err.message });
+      res.status(500).json({ error: err.message });
     }
   }
 });
 
-// ─── Köhnə /start route (uyğunluq üçün saxlanılır) ───────────────────────
+// ─── Audio yükləməni başlat ───────────────────────────────────────────────
 router.post('/start', async (req, res) => {
   const { url, cookieString } = req.body;
 
-  if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
+  if (!url) {
+    return res.status(400).json({ error: 'URL tələb olunur' });
+  }
 
   const fileId = crypto.randomBytes(16).toString('hex');
-  const platform = detectPlatform(url);
+  const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
+  const isTikTok = url.includes('tiktok.com');
+  const isInstagram = url.includes('instagram.com');
 
-  console.log(`🎵 [${platform}] /start: ${url}`);
+  console.log(`🎵 Audio download: ${url}`);
+
+  const outputPath = path.join(audioDir, `out_${fileId}.m4a`);
+  let title = 'audio';
 
   const tempCookieFile = createTempCookieFile(cookieString, fileId);
-  const cookiePath = tempCookieFile || getStaticCookieArg();
+  const cookieArg = tempCookieFile
+    ? `--cookies "${tempCookieFile}"`
+    : getStaticCookieArg();
+
+  console.log(`🍪 Cookie: ${tempCookieFile ? 'Flutter (dinamik)' : (cookieArg ? 'env (statik)' : 'yoxdur')}`);
 
   try {
-    const outputTemplate = path.join(audioDir, `out_${fileId}.%(ext)s`);
+    try {
+      const titleCmd = `yt-dlp --get-title --no-playlist ${cookieArg} "${url}"`;
+      const { stdout } = await execPromise(titleCmd, { timeout: 15000 });
+      title = stdout.trim() || 'audio';
+    } catch (_) {}
 
-    const args = [
-      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best',
-      '--no-playlist',
-      '--retries', '3',
-      '--socket-timeout', '30',
-      '-o', outputTemplate,
-    ];
+    let downloadCmd;
 
-    if (cookiePath) args.push('--cookies', cookiePath);
-    if (platform === 'tiktok') {
-      args.push('--extractor-args', 'tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com');
+    if (isYoutube) {
+      downloadCmd = `yt-dlp -f "140/141/139/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" ${cookieArg} --no-playlist --retries 3 -o "${outputPath}" "${url}"`;
+      console.log('🎵 YouTube audio → m4a');
+    } else if (isTikTok) {
+      const tkArgs = '--extractor-args "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"';
+      downloadCmd = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" ${tkArgs} --no-playlist --retries 3 -o "${outputPath}" "${url}"`;
+      console.log('🎵 TikTok audio → m4a');
+    } else if (isInstagram) {
+      downloadCmd = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio" --no-playlist --retries 3 -o "${outputPath}" "${url}"`;
+      console.log('🎵 Instagram audio → m4a');
+    } else {
+      downloadCmd = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best" --no-playlist --retries 3 -o "${outputPath}" "${url}"`;
+      console.log('🎵 Generic audio → m4a');
     }
-    args.push(url);
 
-    await runYtDlp(args);
+    await execPromise(downloadCmd, { timeout: 300000, maxBuffer: 5 * 1024 * 1024 });
 
-    const files = fs.readdirSync(audioDir).filter(f => f.startsWith(`out_${fileId}`));
-    if (files.length === 0) throw new Error('Fayl tapılmadı');
+    let actualPath = require('fs').existsSync(outputPath) ? outputPath : findFile(audioDir, fileId);
+    if (!actualPath) throw new Error('Audio fayl tapılmadı');
 
-    const actualPath = path.join(audioDir, files[0]);
-    const stats = fs.statSync(actualPath);
-    const ext = path.extname(actualPath).slice(1) || 'm4a';
-    const finalPath = path.join(audioDir, `out_${fileId}_final.${ext}`);
-    fs.renameSync(actualPath, finalPath);
+    const stats = require('fs').statSync(actualPath);
+    if (stats.size === 0) throw new Error('Audio fayl boşdur');
 
-    const safeTitle = makeSafeTitle(req.body.title || 'audio');
-    const filename = `${safeTitle}.${ext}`;
+    const actualExt = path.extname(actualPath).slice(1) || 'm4a';
+    const finalPath = path.join(audioDir, `out_${fileId}_final.${actualExt}`);
+    require('fs').renameSync(actualPath, finalPath);
+
+    const filename = `${makeSafeTitle(title)}.${actualExt}`;
+    const sizeStr = formatSize(stats.size);
+
+    console.log(`✅ Audio tamamlandı: ${sizeStr} → ${filename}`);
 
     res.json({
-      success: true,
-      fileId: `${fileId}_final`,
+      success:       true,
+      fileId:        `${fileId}_final`,
       filename,
-      filesize: stats.size,
-      sizeFormatted: formatSize(stats.size),
+      filesize:      stats.size,
+      sizeFormatted: sizeStr,
     });
+
   } catch (err) {
-    console.error(`❌ /start xətası: ${err.message}`);
+    console.error(`❌ Audio download xətası: ${err.message}`);
+    cleanupDir(audioDir, fileId);
     res.status(500).json({ success: false, error: err.message });
   } finally {
     if (tempCookieFile) {
-      try { fs.unlinkSync(tempCookieFile); } catch (_) {}
+      try { require('fs').unlinkSync(tempCookieFile); } catch (_) {}
     }
   }
 });
 
-// ─── /file/:fileId (köhnə uyğunluq) ──────────────────────────────────────
+// ─── Audio faylı göndər ───────────────────────────────────────────────────
 router.get('/file/:fileId', async (req, res) => {
   const { fileId } = req.params;
   const exts = ['m4a', 'mp3', 'aac', 'opus', 'webm'];
 
+  let filePath = null;
+
   for (const ext of exts) {
     const testPath = path.join(audioDir, `out_${fileId}.${ext}`);
     try {
-      await fsp.access(testPath);
-      return res.download(testPath, path.basename(testPath), (err) => {
-        if (err) console.error('❌', err.message);
-        setTimeout(() => { try { fs.unlinkSync(testPath); } catch (_) {} }, 60000);
-      });
+      await fs.access(testPath);
+      filePath = testPath;
+      break;
     } catch (_) {}
   }
 
-  res.status(404).json({ error: 'Fayl tapılmadı' });
+  if (!filePath) {
+    return res.status(404).json({ error: 'Audio fayl tapılmadı' });
+  }
+
+  console.log(`📤 Audio göndərilir: ${path.basename(filePath)}`);
+
+  res.download(filePath, path.basename(filePath), (err) => {
+    if (err) console.error('❌ Audio göndərmə xətası:', err);
+    setTimeout(() => {
+      try {
+        require('fs').unlinkSync(filePath);
+        console.log(`🗑️ Audio silindi: ${path.basename(filePath)}`);
+      } catch (_) {}
+    }, 60000);
+  });
 });
 
-// ─── /info ────────────────────────────────────────────────────────────────
+// ─── Audio məlumatı al ────────────────────────────────────────────────────
 router.post('/info', async (req, res) => {
   const { url } = req.body;
+
   if (!url) return res.status(400).json({ error: 'URL tələb olunur' });
 
   try {
-    const data = await runYtDlp(['--dump-json', '--no-playlist', '--socket-timeout', '30', url]);
-    const json = JSON.parse(data);
-    const formats = json.formats || [];
-    const audioFormats = formats.filter(f => f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'));
+    const cmd = `yt-dlp --dump-json --no-playlist --socket-timeout 30 "${url}"`;
+    const { stdout } = await execPromise(cmd, { timeout: 35000, maxBuffer: 10 * 1024 * 1024 });
+    const data = JSON.parse(stdout);
+
+    const formats = data.formats || [];
+    const audioFormats = formats.filter(f =>
+      f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec)
+    );
+
+    const qualities = [];
+    if (audioFormats.length > 0) {
+      qualities.push({
+        label:      'MP3 (Audio)',
+        value:      'audio',
+        formatId:   audioFormats[0].format_id,
+        filesize:   audioFormats[0].filesize || null,
+        ext:        'm4a',
+        needsMerge: false,
+        _source:    'audio_direct',
+      });
+    }
 
     res.json({
       success: true,
       data: {
-        title: json.title || 'Audio',
-        thumbnail: json.thumbnail || '',
-        duration: formatDuration(json.duration || 0),
-        platform: detectPlatform(url),
-        uploader: json.uploader || json.channel || '',
-        qualities: audioFormats.length > 0 ? [{
-          label: 'MP3 (Audio)',
-          value: 'audio',
-          formatId: audioFormats[0].format_id,
-          filesize: audioFormats[0].filesize || null,
-          ext: 'm4a',
-          needsMerge: false,
-        }] : [],
+        title:    data.title || 'Audio',
+        thumbnail: data.thumbnail || '',
+        duration: formatDuration(data.duration || 0),
+        platform: url.includes('youtube.com') ? 'youtube' :
+                  (url.includes('tiktok.com') ? 'tiktok' :
+                   (url.includes('instagram.com') ? 'instagram' : 'other')),
+        uploader: data.uploader || data.channel || '',
+        qualities,
       },
     });
   } catch (err) {
-    console.error('❌ Info xətası:', err.message);
+    console.error('❌ Audio info xətası:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
