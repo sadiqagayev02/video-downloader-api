@@ -73,6 +73,7 @@ def try_ytdlp_with_cookie(url):
     """
     yt-dlp ilə Instagram məlumatı al.
     Cookie varsa istifadə et.
+    Birdən çox JSON ola bilər (carousel) — hər sətri ayrı parse et.
     """
     try:
         cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--socket-timeout', '20']
@@ -99,13 +100,36 @@ def try_ytdlp_with_cookie(url):
             print(f'DEBUG ytdlp stderr: {result.stderr[:300]}', file=sys.stderr)
             return None
 
-        data = json.loads(result.stdout)
-        return data
+        # ─── DÜZƏLİŞ: Hər sətri ayrı parse et ────────────────────────────
+        lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+        parsed_items = []
+        for ln in lines:
+            try:
+                parsed_items.append(json.loads(ln))
+            except json.JSONDecodeError as e:
+                print(f'DEBUG ytdlp parse sətri atlandı: {e}', file=sys.stderr)
+
+        if not parsed_items:
+            return None
+
+        # Carousel ola bilər → video olan ilk item-i seç
+        for item in parsed_items:
+            formats = item.get('formats', [])
+            has_video = any(
+                f.get('vcodec') and f.get('vcodec') != 'none'
+                for f in formats
+            ) or item.get('url', '').endswith('.mp4')
+            if has_video:
+                print(f'DEBUG ytdlp: {len(parsed_items)} item tapıldı, video olan seçildi', file=sys.stderr)
+                return item
+
+        # Video yoxdursa, ilk item-i qaytar
+        print(f'DEBUG ytdlp: {len(parsed_items)} item tapıldı, ilki istifadə olunur', file=sys.stderr)
+        return parsed_items[0]
 
     except Exception as e:
         print(f'DEBUG ytdlp xəta: {e}', file=sys.stderr)
         return None
-
 
 def process_ytdlp_data(data):
     """yt-dlp JSON-ndan bizim formatda media məlumatı çıxar"""
